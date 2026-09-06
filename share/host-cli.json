@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "commands": [
+    { "name": "ios-dev-sandbox-gpg-sign", "path": "@@BIN@@/ios-dev-sandbox-gpg-sign",
+      "allowedSubcommands": ["sign", "keyid"] }
+  ]
+}

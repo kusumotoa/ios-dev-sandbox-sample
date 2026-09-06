@@ -1,0 +1,5 @@
+# MCP として使えるようにするエージェント。1 行 1 つ。# 以降はコメント。
+# codex か claude。相手側の認証が別に要る。手順: docs/instructions/agents/mcp-agents.md
+#
+# 例:
+# codex

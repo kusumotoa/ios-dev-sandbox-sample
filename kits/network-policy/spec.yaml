@@ -1,0 +1,30 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: network-policy
+displayName: チームのネットワークポリシー
+description: |
+  全 iOS プロジェクトのサンドボックスに効く、チームでレビューした外向き allowlist。
+  sbx は外向き TCP を既定で全て塞ぐ。ここに書かなければ GitHub に届くのは、各マシン
+  の `sbx policy` プリセットがたまたま許可しているからにすぎず、管理もレビューも
+  されていない依存になる。ここで宣言すれば PR レビューの対象になる。
+
+  意図的にここに書かないもの:
+    - Anthropic のエンドポイント（api.anthropic.com、claude.com、…）は
+      組み込みの `agent: claude` kit が既に許可する
+    - localhost のブリッジのポートは host-mcp kit が宣言する（host-cli と
+      commit-signing も同じ宛先を使うが、宣言はそこに集約している）
+
+  kit の `allow` は、マシンごとに sbx の初回起動時に一度選ぶグローバルポリシーへの
+  足し算にしかならず、緩いものを厳しくはしない。`deny` は厳しくできる。ここでの
+  deny はグローバルの allow に勝つので、このファイルへのレビュー付きの変更で、
+  全サンドボックスから宛先を取り上げられる。今のところ deny は無く、プリセットの
+  集合をそのまま受け入れている。`sbx policy reset` と `init deny-all` が要るのは、
+  その集合ごと捨てて組み直したいときだけ。Docker の組織ガバナンスが有効な間、
+  kit の規則は無視される。
+permissions:
+  network:
+    allow:
+      - github.com
+      - "*.github.com"
+      - "*.githubusercontent.com"

@@ -1,0 +1,51 @@
+#!/bin/bash
+# サンドボックスのために、ホストの GPG 鍵で git オブジェクトに署名する。
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'EOS'
+usage: ios-dev-sandbox-gpg-sign <subcommand>
+
+  sign    Read a git object on stdin, write its armored signature to stdout
+          and GnuPG status lines to stderr (git's --status-fd=2 contract).
+  keyid   Print the signing key this host would use.
+EOS
+    exit 2
+}
+
+key=$(git config --global user.signingkey || true)
+if [ -z "$key" ]; then
+    echo "ios-dev-sandbox-gpg-sign: git config --global user.signingkey is not set" >&2
+    exit 2
+fi
+
+format=$(git config --global gpg.format || echo openpgp)
+if [ "$format" != "openpgp" ]; then
+    echo "ios-dev-sandbox-gpg-sign: host git uses gpg.format=$format; only openpgp is bridged" >&2
+    exit 2
+fi
+
+case "${1:-}" in
+    keyid)
+        echo "$key"
+        ;;
+    sign)
+        # `$()` は末尾の改行を落とす。`x` を足して持ち越す。
+        payload=$(cat; printf x)
+        payload=${payload%x}
+        # コミットは "tree " で、注釈付きタグは "object " で始まる。
+        case "$payload" in
+            "tree "*|"object "*) ;;
+            *)
+                echo "ios-dev-sandbox-gpg-sign: payload is not a git commit or tag; refusing to sign" >&2
+                exit 3
+                ;;
+        esac
+        gpg=$(git config --global gpg.program || echo gpg)
+        # git 自身の argv から鍵を除いたもの。--batch --no-tty は、尋ねずに失敗させる指定。
+        printf '%s' "$payload" | "$gpg" --status-fd=2 --batch --no-tty -bsau "$key"
+        ;;
+    *)
+        usage
+        ;;
+esac

@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+.DS_Store
+.claude/
+*.log
+__pycache__/
+local/*
+!local/README.md

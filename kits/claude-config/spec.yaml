@@ -1,0 +1,21 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: claude-config
+displayName: Claude Code のチーム標準設定
+description: |
+  share/claude/ の settings・ステータスライン・プラグインを ~/.claude へ配る。
+  ホストの ~/.claude は読まない。
+
+  claude がメインのときはここで配る。MCP として使うときは、claude を入れた
+  直後に mcp-agents kit が同じスクリプトを呼ぶ。kit はアルファベット順に走るので、
+  この時点では MCP として入る claude はまだ入っていない。
+setup:
+  install:
+    - command: |
+        set -e
+        # メインが claude でなければ、MCP として入るときに mcp-agents が呼ぶ。
+        [ "${IOS_DEV_SANDBOX_AGENT:-claude}" = claude ] || exit 0
+        sh /home/agent/.local/lib/setup-claude
+      user: "0"
+      description: チーム標準の settings・ステータスライン・プラグインを配る

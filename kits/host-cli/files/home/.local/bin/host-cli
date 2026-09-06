@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""macOS ホストのコマンドをサンドボックスから実行する。
+
+ホスト側で動かせるコマンドと同じ名前で置かれるので、普通にその名前を呼べば動く。
+
+    host-cli list     # ホスト側で動かせるコマンドの一覧
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+EXEC_URL = os.environ.get("HOST_BRIDGE_URL", "http://host.docker.internal:19721/exec")
+HEALTH_URL = EXEC_URL[: -len("/exec")] + "/health" if EXEC_URL.endswith("/exec") else EXEC_URL
+
+def post(url: str, payload: dict | None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/json",
+    })
+    with urllib.request.urlopen(request, timeout=600) as response:
+        return json.load(response)
+
+
+def describe() -> int:
+    try:
+        health = post(HEALTH_URL, None)
+    except Exception as error:
+        print(f"host-cli: bridge unreachable at {HEALTH_URL}: {error}", file=sys.stderr)
+        return 127
+    for name in health.get("commands", []):
+        print(name)
+    return 0
+
+
+def forward(name: str, args: list[str], stdin: str | None = None) -> int:
+    try:
+        result = post(EXEC_URL, {
+            "command": name,
+            "args": args,
+            # ワークスペースは両側で同じ絶対パスにマウントされるので、相対指定の
+            # --output は呼び出し側が期待する場所に落ちる。
+            "cwd": os.getcwd(),
+            "stdin": stdin,
+        })
+    except urllib.error.HTTPError as error:
+        try:
+            result = json.load(error)
+        except Exception:
+            print(f"host-cli: HTTP {error.code}", file=sys.stderr)
+            return 126
+    except Exception as error:
+        print(f"host-cli: {error}", file=sys.stderr)
+        return 127
+
+    sys.stdout.write(result.get("stdout", ""))
+    sys.stderr.write(result.get("stderr", ""))
+    if result.get("bridgeError"):
+        print(f"host-cli: {result['bridgeError']}", file=sys.stderr)
+    return int(result.get("exitCode", 1))
+
+
+def sign() -> int:
+    """ホストの GPG 鍵でコミットまたはタグに署名する。
+
+    git は `gpg.program` を `--status-fd=2 -bsau <鍵>` で起動し、対象を stdin で
+    渡して署名を stdout で受け取る。git の argv は捨てる。使う鍵はホスト側の
+    ラッパーがホストの git 設定から取る。
+    """
+    if "--verify" in sys.argv[1:]:
+        print("git-gpg-sign: signing is bridged, verification is not", file=sys.stderr)
+        return 1
+    return forward("ios-dev-sandbox-gpg-sign", ["sign"], stdin=sys.stdin.read())
+
+
+def main() -> int:
+    name = os.path.basename(sys.argv[0])
+    if name == "host-cli":
+        if sys.argv[1:2] == ["list"]:
+            return describe()
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    if name == "git-gpg-sign":
+        return sign()
+    return forward(name, sys.argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

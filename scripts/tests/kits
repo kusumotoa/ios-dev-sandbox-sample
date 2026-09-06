@@ -1,0 +1,286 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+fails=0
+while IFS= read -r spec; do
+  block=0
+  while IFS= read -r script; do
+    block=$((block + 1))
+    if printf '%s' "$script" | python3 -c '
+import sys, base64
+sys.stdout.write(base64.b64decode(sys.stdin.read()).decode())
+' | dash -n; then
+      echo "  ok   $spec ブロック $block (dash -n)"
+    else
+      echo "  FAIL $spec ブロック $block" >&2
+      fails=$((fails + 1))
+    fi
+  done < <(python3 - "$spec" <<'PY'
+# install は "- command: |" のスカラー、startup は "- command:" の下に sh -c と本文を
+# 並べた配列。行の形だけで拾うと後者が丸ごと漏れる（起動のたびに走り、claude-config の
+# ものは root で走るのに）。PyYAML は環境にないので行で読む。
+import base64, re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read().split("\n")
+
+
+def take_block(start, indent):
+    """indent より深い行を、空行を挟んでも本文として集める。"""
+    body, i = [], start
+    while i < len(src) and (not src[i].strip() or src[i].startswith(" " * indent)):
+        body.append(src[i][indent:])
+        i += 1
+    return "\n".join(body), i
+
+
+i = 0
+while i < len(src):
+    scalar = re.match(r"^(\s*)- command: \|$", src[i])
+    seq = re.match(r"^(\s*)- command:\s*$", src[i])
+    if scalar:
+        script, i = take_block(i + 1, len(scalar.group(1)) + 4)
+    elif seq:
+        # 本文は最後の "- |" の下。それより前の要素（sh, -c）は読み飛ばす。
+        indent = len(seq.group(1)) + 4
+        i += 1
+        script = ""
+        while i < len(src) and src[i].startswith(" " * indent + "- "):
+            if src[i].strip() == "- |":
+                script, i = take_block(i + 1, indent + 2)
+                break
+            i += 1
+    else:
+        i += 1
+        continue
+    if script.strip():
+        print(base64.b64encode(script.encode()).decode())
+PY
+  )
+done < <(ls kits/*/spec.yaml)
+
+while IFS= read -r helper; do
+  if python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$helper" 2>/dev/null; then
+    echo "  ok   $helper (python 構文)"
+  else
+    echo "  FAIL $helper (python 構文)" >&2
+    fails=$((fails + 1))
+  fi
+done < <(find kits/*/files -name '*.py' -o -name 'host-cli' -type f 2>/dev/null)
+
+if python3 - <<'PY'
+import importlib.util, json, sys, tempfile, tomllib
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+reg = load("reg", "kits/host-mcp/files/home/.local/lib/register-mcp.py")
+cfg = load("cfg", "kits/claude-config/files/home/.local/lib/claude-config.py")
+tmp = tempfile.mkdtemp()
+bad = []
+
+# チーム標準に permissions を書くと、最上位だけ置き換える実装では sbx が入れた
+# permissions.defaultMode が消える。
+dest, team = f"{tmp}/dest.json", f"{tmp}/team.json"
+json.dump({"permissions": {"defaultMode": "bypassPermissions"}, "keep": 1}, open(dest, "w"))
+json.dump({"permissions": {"allow": ["Bash(git:*)"]}}, open(team, "w"))
+cfg.merge_settings(team, dest)
+got = json.load(open(dest))
+if got.get("permissions", {}).get("defaultMode") != "bypassPermissions":
+    bad.append(f"defaultMode を残せていない: {got}")
+if got.get("permissions", {}).get("allow") != ["Bash(git:*)"]:
+    bad.append(f"チーム標準の allow が入っていない: {got}")
+if got.get("keep") != 1:
+    bad.append(f"関係ないキーを消している: {got}")
+
+# codex の config.toml は MCP の登録と同居する。provider を書くとき表の中の
+# model まで消すと [profiles.<名前>] のモデル指定が飛ぶ。
+toml = f"{tmp}/config.toml"
+open(toml, "w").write('approval_policy = "never"\n\n[profiles.review]\nmodel = "o3"\n\n[mcp_servers.xcode]\ntype = "http"\n')
+reg.register_provider(toml, "gw.example.com", "gw-model")
+d = tomllib.load(open(toml, "rb"))
+if d.get("model_provider") != "llm_gateway" or d.get("model") != "gw-model":
+    bad.append(f"provider を書けていない: {d}")
+if d.get("profiles", {}).get("review", {}).get("model") != "o3":
+    bad.append(f"profiles のモデル指定を消している: {d}")
+if "xcode" not in d.get("mcp_servers", {}):
+    bad.append(f"MCP の登録を消している: {d}")
+if d.get("approval_policy") != "never":
+    bad.append(f"他のトップレベルのキーを消している: {d}")
+
+# 書き込みの途中で落ちても設定ごと失わないこと。open(path, "w") は先に中身を
+# 捨てるので、直接書く実装だと settings.json が空のまま残る。
+before = open(dest).read()
+try:
+    cfg.write_json(dest, {"bad": {1, 2}})
+except TypeError:
+    pass
+if open(dest).read() != before:
+    bad.append("書き込みに失敗したときに元のファイルが壊れている")
+
+for b in bad:
+    print(b)
+sys.exit(1 if bad else 0)
+PY
+then
+  echo "  ok   設定の書き換えが既存のキーを壊さない"
+else
+  echo "  FAIL 設定の書き換えが既存のキーを壊している" >&2
+  fails=$((fails + 1))
+fi
+
+picker=kits/gh/files/home/.local/lib/pick-gh-release.py
+if [ -f "$picker" ]; then
+  if python3 - "$picker" <<'PY'
+import datetime, json, subprocess, sys
+
+picker = sys.argv[1]
+
+
+def run(stdin, days="7"):
+    p = subprocess.run([sys.executable, picker, days], input=stdin,
+                       capture_output=True, text=True)
+    return p.returncode, p.stdout.strip()
+
+
+def rel(tag, days_ago, **kw):
+    when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
+    out = {"tag_name": tag, "published_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "draft": False, "prerelease": False}
+    out.update(kw)
+    return out
+
+
+bad = []
+
+code, out = run(json.dumps([rel("v2.99.0", 2), rel("v2.98.0", 14), rel("v2.97.0", 40)]))
+if (code, out) != (0, "2.98.0"):
+    bad.append(f"7 日未満を飛ばして最新を選べていない: {code} {out!r}")
+
+code, out = run(json.dumps([rel("v2.97.0", 40), rel("v2.98.0", 14), rel("v2.99.0", 2)]))
+if (code, out) != (0, "2.98.0"):
+    bad.append(f"並び順に依存している: {code} {out!r}")
+
+code, out = run(json.dumps([rel("v3.0.0", 30, prerelease=True), rel("v2.9.0", 30, draft=True),
+                            rel("v2.8.0", 30)]))
+if (code, out) != (0, "2.8.0"):
+    bad.append(f"draft/prerelease を除けていない: {code} {out!r}")
+
+code, out = run(json.dumps([rel("v2.99.0", 1)]))
+if (code, out) != (0, ""):
+    bad.append(f"該当なしで無出力にならない: {code} {out!r}")
+
+for label, payload in [("空", ""), ("JSON でない", "not json"),
+                       ("配列でない", '{"message":"API rate limit exceeded"}'),
+                       ("要素が壊れている", '[{"tag_name":"v1","published_at":"nope"},null,7]')]:
+    code, out = run(payload)
+    if (code, out) != (0, ""):
+        bad.append(f"{label}入力で異常終了する: {code} {out!r}")
+
+for days in ["", "abc"]:
+    code, out = run("[]", days)
+    if code != 0:
+        bad.append(f"days={days!r} で異常終了する: {code}")
+
+for b in bad:
+    print(b)
+sys.exit(1 if bad else 0)
+PY
+  then
+    echo "  ok   $picker (版選びの挙動)"
+  else
+    echo "  FAIL $picker (版選びの挙動)" >&2
+    fails=$((fails + 1))
+  fi
+fi
+
+# litellm kit は宛先をプレースホルダで持ち、作成時に local/gateway.json の host で
+# 埋めた複製を渡す。spec 側が実ホスト名に置き換わると、それが git に入る。
+if grep -q 'litellm-gateway\.placeholder\.invalid' kits/litellm/spec.yaml 2>/dev/null; then
+  echo "  ok   litellm kit の宛先はプレースホルダのまま"
+else
+  echo "  FAIL kits/litellm/spec.yaml の宛先が実ホスト名に置き換わっています" >&2
+  fails=$((fails + 1))
+fi
+
+if command -v sbx >/dev/null 2>&1; then
+  for kit in kits/*/; do
+    if sbx kit validate "$kit" >/dev/null; then
+      echo "  ok   $kit (sbx kit validate)"
+    else
+      echo "  FAIL sbx kit validate $kit" >&2
+      fails=$((fails + 1))
+    fi
+  done
+else
+  echo "  skip sbx kit validate（sbx 未導入）"
+fi
+
+wrap=kits/gh-token/files/home/.local/lib/gh-token-wrapper
+if [ -x "$wrap" ]; then
+  tmp=$(mktemp -d)
+  printf '#!/bin/sh\necho "$GH_TOKEN"\n' > "$tmp/fake-gh"
+  chmod +x "$tmp/fake-gh"
+  printf 'o/writable\n' > "$tmp/writable-repos"
+  sed -e "s|^real=/usr/bin/gh\$|real=$tmp/fake-gh|" \
+      -e "s|^list=.*\$|list=$tmp/writable-repos|" "$wrap" > "$tmp/gh"
+  chmod +x "$tmp/gh"
+  export GH_TOKEN_CODE_REPOS_RW=RW GH_TOKEN_CODE_REPOS_RO=RO
+  check_wrap() {
+    got=$(cd "$tmp" && ./gh "$@" 2>/dev/null)
+    if [ "$got" = "$expect" ]; then
+      echo "  ok   gh ラッパー: $label"
+    else
+      echo "  FAIL gh ラッパー: $label ($got != $expect)" >&2
+      fails=$((fails + 1))
+    fi
+  }
+  expect=RW label="--repo は書き込み可"        check_wrap pr list --repo o/writable
+  expect=RW label="-R も同じ"                  check_wrap pr list -R o/writable
+  expect=RW label="--repo= 形式も同じ"         check_wrap pr list --repo=o/writable
+  expect=RO label="リスト外は読み取り専用"     check_wrap pr list --repo o/other
+  expect=RO label="対象不明も読み取り専用"     check_wrap api user
+
+  # 一覧が無いのは作成時の取得に失敗した状態。全部読み取り専用に倒し、警告を出す。
+  mv "$tmp/writable-repos" "$tmp/writable-repos.bak"
+  expect=RO label="一覧が無ければ読み取り専用" check_wrap pr list --repo o/writable
+  warned=$(cd "$tmp" && ./gh pr list --repo o/writable 2>&1 >/dev/null | grep -c "apply" || true)
+  if [ "$warned" -ge 1 ]; then
+    echo "  ok   gh ラッパー: 一覧が無ければ apply を促す"
+  else
+    echo "  FAIL gh ラッパー: 一覧が無いのに警告が出ない" >&2
+    fails=$((fails + 1))
+  fi
+  mv "$tmp/writable-repos.bak" "$tmp/writable-repos"
+
+  unset GH_TOKEN_CODE_REPOS_RW GH_TOKEN_CODE_REPOS_RO
+  rm -rf "$tmp"
+fi
+
+for spec in kits/*/spec.yaml; do
+  [ -f "$spec" ] || continue
+  if grep -q "^agentInstructions:" "$spec"; then
+    echo "  FAIL $spec は届かない agentInstructions を持つ" >&2
+    fails=$((fails + 1))
+  fi
+done
+echo "  ok   届かない agentInstructions を持つ kit は無い"
+
+guides=$(find share kits -name 'AGENTS.md' -o -name 'agent-instructions.md' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$guides" = "1" ]; then
+  echo "  ok   指示の実体は 1 つ（share/AGENTS.md）"
+else
+  echo "  FAIL 指示の実体が $guides 個ある" >&2
+  fails=$((fails + 1))
+fi
+
+
+if [ "$fails" -eq 0 ]; then
+  echo "kits: all checks passed"
+else
+  echo "kits: $fails 件失敗" >&2
+fi
+exit "$fails"

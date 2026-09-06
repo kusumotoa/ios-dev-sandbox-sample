@@ -1,0 +1,46 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: skills
+displayName: チーム標準と個人のスキル（読み取り専用マウント）
+description: |
+  agent のスキル置き場（claude と copilot は設定ディレクトリの skills、codex は
+  ~/.agents/skills）を、リポジトリの share/skills（チーム標準）と local/skills
+  （個人）へ向ける。読み取り専用マウント越しの symlink なので、スキルの編集は
+  作り直さずに効き、書き戻す経路も無い。ホストの ~/.claude は読まない。
+setup:
+  install:
+    - command: |
+        set -e
+        # codex だけ sbx が用意する ~/.agents/skills を読む。claude と copilot は
+        # 自分の設定ディレクトリの下。
+        case "${IOS_DEV_SANDBOX_AGENT:-claude}" in
+          codex) dest=/home/agent/.agents/skills ;;
+          *)     dest="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.claude}/skills" ;;
+        esac
+        mkdir -p "$(dirname "$dest")"
+        rm -rf "$dest"
+        mkdir -p "$dest"
+
+        link_skills() {
+            src=$1
+            label=$2
+            [ -n "$src" ] || return 0
+            [ -d "$src" ] || return 0
+            for path in "$src"/*/; do
+                [ -d "$path" ] || continue
+                name=$(basename "$path")
+                if [ -e "$dest/$name" ]; then
+                    echo "[skills] $name は先に張った方を使います（$label 側は影）" >&2
+                    continue
+                fi
+                # chown -h は :ro のリンク先を解決しに行って失敗する。
+                ln -sfn "${path%/}" "$dest/$name"
+            done
+        }
+
+        link_skills "${IOS_DEV_SANDBOX_LOCAL_SKILLS:-}" 個人
+        link_skills "${IOS_DEV_SANDBOX_TEAM_SKILLS:-}" チーム標準
+
+      user: "0"
+      description: 個人とチーム標準のスキルを ~/.claude/skills に集める

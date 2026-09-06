@@ -1,0 +1,4 @@
+# チーム標準のプラグイン。1 行 1 つ、<plugin>@<marketplace> の形で書く。
+# Claude Code だけの機能で、codex と copilot では読まれない。
+# 手順: share/README.md
+feature-dev@claude-plugins-official

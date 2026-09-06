@@ -1,0 +1,33 @@
+# チェックアウトから直接使う。brew は使わない。
+#
+#   git clone <このリポジトリ>
+#   mise run setup
+#
+# 更新は git pull のあと mise run setup をやり直す（Swift のビルドが要るため）。
+#
+# 使えるタスクの一覧は mise tasks。
+
+[tools]
+# Swift はホストの Xcode に付属するものを使う。ここでは固定しない。
+# （mise の swift プラグインを使うと Xcode と食い違う）
+
+[tasks.setup]
+description = "ビルドして ~/.local/bin に置き、設定とトークンの置き場を作る"
+run = "./scripts/setup"
+
+[tasks.build]
+description = "ホストのバイナリをビルドする"
+run = "swift build -c release"
+
+[tasks.test]
+description = "テストを走らせ、全 kit を検証する"
+run = [
+  "swift test",
+  "./scripts/tests/launcher",
+  "./scripts/tests/kits",
+  "./scripts/tests/gpg-sign",
+  "./scripts/tests/mcp-servers",
+  "bash -n scripts/ios-dev-sandbox scripts/lib/*.sh scripts/ios-dev-sandbox-gpg-sign scripts/setup",
+  "python3 -m json.tool share/host-cli.json >/dev/null",
+  "echo 'static checks OK'",
+]

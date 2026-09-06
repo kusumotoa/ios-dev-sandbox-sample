@@ -1,0 +1,62 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: gh-token
+displayName: gh のトークン使い分け
+description: |
+  対象リポジトリに応じて、gh が使う PAT を書き込み用と読み取り専用で切り替える。
+  sbx のサービスシークレットは 1 ドメインに 1 つしか持てず、api.github.com への
+  認証を上書きするため、2 本目を使うには set-custom で別の env に載せる必要がある
+  （実測）。書き込み可能なリポジトリの一覧は、作成時に書き込み用 PAT のスコープを
+  GitHub に問い合わせて作る。手で列挙しないので、PAT のスコープと必ず一致する。
+setup:
+  install:
+    - command: |
+        set -e
+        src=/home/agent/.local/lib/gh-token-wrapper
+        if [ ! -f "$src" ]; then
+            echo "[gh-token] ラッパーが見つかりません: $src" >&2
+            exit 0
+        fi
+        install -m 755 "$src" /usr/local/bin/gh
+      user: "0"
+      description: gh のラッパーを有効にする
+
+    - command: |
+        set -e
+        out=/home/agent/.config/ios-dev-sandbox/writable-repos
+
+        # 書き込み用 PAT のスコープを引く。api.github.com 宛の認証はプロキシが
+        # 差し込むので、ここでトークンの値は要らない。2 本立てのときは、どちらが
+        # 差し込まれるかを GH_TOKEN で選ぶ（未設定なら 1 本構成の既定が載る）。
+        # 素の gh を直に呼ぶ。/usr/local/bin/gh はラッパーで、この一覧をまだ
+        # 持たない状態で呼ぶと読み取り専用に倒れる。
+        token="${GH_TOKEN_CODE_REPOS_RW:-${GH_TOKEN:-}}"
+
+        # ページの取り漏らしは「書けるはずのリポジトリが黙って読み取り専用になる」
+        # という形で出る。1 ページでも失敗したら何も書かずに転ぶ。
+        if ! body=$(GH_TOKEN="$token" /usr/bin/gh api \
+                "/user/repos?per_page=100" --paginate \
+                --jq '.[] | select(.permissions.push) | .full_name' 2>&1); then
+            case "$body" in
+                *"401"*|*"Bad credentials"*|*"Requires authentication"*)
+                    echo "[gh-token] PAT が未設定です。gh はトークンを使い分けません" >&2
+                    exit 0
+                    ;;
+            esac
+            echo "[gh-token] 書き込み可能なリポジトリを取得できません: $body" >&2
+            echo "[gh-token] 通信が回復してから ios-dev-sandbox apply で作り直してください" >&2
+            exit 1
+        fi
+
+        # 一時ファイルに書いてから差し替える。途中まで書かれた一覧を残さない。
+        # 同じディレクトリに作る。/tmp が別ファイルシステムだと、mv が rename では
+        # なくコピーに落ちて原子性を失う。
+        mkdir -p "$(dirname "$out")"
+        tmp=$(mktemp -p "$(dirname "$out")")
+        printf '%s\n' "$body" | tr -d ' ' | grep -v '^$' > "$tmp" || true
+        mv "$tmp" "$out"
+        chown -R agent:agent "$(dirname "$out")" 2>/dev/null || true
+        echo "[gh-token] 書き込み可能なリポジトリ: $(wc -l < "$out") 件"
+      user: "0"
+      description: 書き込み用 PAT のスコープから書き込み可能なリポジトリを引く

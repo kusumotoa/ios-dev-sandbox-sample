@@ -1,0 +1,77 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: gh
+displayName: 新しい gh
+description: |
+  ベースイメージの gh は Ubuntu パッケージで数十バージョン古い。公式リリースの
+  うち「公開から 7 日以上経った最新版」を入れる。版を焼き込まないので、誰が
+  いつサンドボックスを作っても、その時点の条件を満たす最新版が入る。
+  ネットワークポリシーは github.com / *.github.com / *.githubusercontent.com を
+  既に許可しているので、追加の許可は要らない。3 つとも要る。リリース一覧は
+  api.github.com（= *.github.com）、成果物の実体は github.com からの 302 の先の
+  *.githubusercontent.com にある。
+setup:
+  install:
+    - command: |
+        set -e
+        MIN_AGE_DAYS=7
+
+        releases=$(curl -fsSL --max-time 15 \
+            "https://api.github.com/repos/cli/cli/releases?per_page=30" || true)
+        if [ -z "$releases" ]; then
+            echo "[gh] api.github.com からリリース一覧を取得できません（未認証は 60 回/時）。既存の gh のままにします" >&2
+            exit 0
+        fi
+
+        version=$(printf '%s' "$releases" \
+          | python3 /home/agent/.local/lib/pick-gh-release.py "$MIN_AGE_DAYS")
+        if [ -z "$version" ]; then
+            echo "[gh] 公開 ${MIN_AGE_DAYS} 日以上のリリースが見つかりません。既存の gh のままにします" >&2
+            exit 0
+        fi
+
+        current=$(gh --version 2>/dev/null | head -1 | awk '{print $3}' || true)
+        case "$current" in
+            ''|*[!0-9.-]*) current= ;;
+        esac
+        if [ -n "$current" ] && dpkg --compare-versions "$current" ge "$version"; then
+            echo "[gh] 導入済みの $current は選定版 $version 以上。そのままにします"
+            exit 0
+        fi
+
+        arch=$(dpkg --print-architecture)
+        base="https://github.com/cli/cli/releases/download/v${version}"
+        deb="gh_${version}_linux_${arch}.deb"
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT INT TERM
+
+        if ! curl -fsSL --max-time 30 --retry 2 \
+                -o "$tmp/checksums.txt" "$base/gh_${version}_checksums.txt"; then
+            echo "[gh] $version の checksums.txt を取得できません。既存の gh のままにします" >&2
+            exit 0
+        fi
+        expected=$(awk -v f="$deb" '$2 == f {print $1}' "$tmp/checksums.txt")
+        if [ -z "$expected" ]; then
+            echo "[gh] checksums.txt に $deb がありません。既存の gh のままにします" >&2
+            exit 0
+        fi
+
+        if ! curl -fsSL --max-time 300 --retry 2 -o "$tmp/$deb" "$base/$deb"; then
+            echo "[gh] $deb を取得できません。既存の gh のままにします" >&2
+            exit 0
+        fi
+
+        actual=$(sha256sum "$tmp/$deb" | awk '{print $1}')
+        if [ "$expected" != "$actual" ]; then
+            echo "[gh] $deb のチェックサムが一致しません" >&2
+            exit 1
+        fi
+
+        if ! dpkg -i "$tmp/$deb" >/dev/null; then
+            echo "[gh] dpkg -i に失敗しました。既存の gh のままにします" >&2
+            exit 0
+        fi
+        echo "[gh] $(gh --version | head -1) を入れました（公開 ${MIN_AGE_DAYS} 日以上の最新）"
+      user: "0"
+      description: 公開から一定期間経った最新の gh を入れる

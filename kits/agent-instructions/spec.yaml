@@ -1,0 +1,28 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: agent-instructions
+displayName: サンドボックスの説明を置く
+description: |
+  share/AGENTS.md を agent の読む場所へ配る。claude は ~/.claude/AGENTS.md と、
+  それを参照する CLAUDE.md。codex は ~/.codex/AGENTS.md。copilot はホーム側では
+  AGENTS.md ではなく copilot-instructions.md を読む。
+setup:
+  install:
+    - command: |
+        set -e
+        src="${IOS_DEV_SANDBOX_TEAM_AGENTS:-}"
+        [ -n "$src" ] && [ -f "$src" ] || exit 0
+        agent="${IOS_DEV_SANDBOX_AGENT:-claude}"
+        home="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.claude}"
+        mkdir -p "$home"
+        case "$agent" in
+          copilot) dest="$home/copilot-instructions.md" ;;
+          *)       dest="$home/AGENTS.md" ;;
+        esac
+        install -m 644 "$src" "$dest"
+        # Claude Code は CLAUDE.md しか自動で読まない。AGENTS.md を参照させる。
+        [ "$agent" = claude ] && printf '@AGENTS.md\n' > "$home/CLAUDE.md"
+        chown -R agent:agent "$home" 2>/dev/null || true
+      user: "0"
+      description: AGENTS.md を agent の読む場所へ置く

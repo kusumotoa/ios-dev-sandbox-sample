@@ -1,0 +1,22 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: git-https
+displayName: HTTPS 経由の GitHub
+description: |
+  サンドボックス内で git@github.com: のリモートを https://github.com/ に書き換え、
+  github.com に対する git の資格情報ヘルパーとして `gh` を設定する。sbx の既定の
+  ネットワークポリシーは github.com を :443 でしか許可しないため、SSH で設定された
+  リモート（ホストで clone したリポジトリの一般的な既定）にはそのままでは届かない。
+  これにより `ios-dev-sandbox github-login` で入れた PAT を使って push/fetch/pull が
+  通る。プロジェクトが管理しているリモート URL には触れない。ワークスペースは
+  コピーではなくマウントで、そのファイルはホストが見ているものと同一だからで、
+  書き換えはサンドボックス側の ~/.gitconfig に置く。ホストからは見えない。
+setup:
+  install:
+    - command: |
+        set -e
+        git config --global url."https://github.com/".insteadOf "git@github.com:"
+        gh auth setup-git || true
+      user: agent
+      description: SSH の GitHub リモートを HTTPS に書き換え、gh を git の資格情報ヘルパーにする

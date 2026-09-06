@@ -1,0 +1,31 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: host-mcp
+displayName: ホストの MCP サーバーを登録する
+permissions:
+  network:
+    allow:
+      - localhost:19721
+description: |
+  host-bridge が 1 ポートで提供するホストの MCP サーバー（Xcode など）を、agent の
+  設定ファイルへ登録する。claude は ~/.claude.json、codex は ~/.codex/config.toml。
+  ブリッジの URL は agent によらず同じ。上の network 許可を持つサンドボックスだけが
+  到達できる（sbx のポリシーは既定 deny）。
+setup:
+  install:
+    - command: |
+        set -e
+        agent="${IOS_DEV_SANDBOX_AGENT:-claude}"
+        home="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.claude}"
+        case "$agent" in
+          claude) target=/home/agent/.claude.json ;;
+          codex)  target=/home/agent/.codex/config.toml; mkdir -p /home/agent/.codex ;;
+          copilot) target="$home/mcp-config.json"; mkdir -p "$home" ;;
+          *) exit 0 ;;
+        esac
+        python3 /home/agent/.local/lib/register-mcp.py bridge \
+            "$agent" "$target" "http://host.docker.internal:19721"
+        chown agent:agent "$target" 2>/dev/null || true
+      user: "0"
+      description: host-bridge の /health を読んで MCP を登録する

@@ -1,0 +1,63 @@
+#!/bin/sh
+# gh のラッパー。対象リポジトリで書き込み用と読み取り専用のトークンを選ぶ。
+# /usr/local/bin が PATH の先なので、これが素の gh より前に立つ。
+#
+# 判定を誤っても危険にはならない。実際の境界は PAT のスコープ側にあり、
+# 誤って書き込み用を選んでもスコープ外なら 404 になるだけ。
+set -u
+
+real=/usr/bin/gh
+[ -x "$real" ] || { echo "gh が見つかりません: $real" >&2; exit 127; }
+
+# トークンが用意されていなければ、素の gh にそのまま渡す（設定していない人の環境）。
+if [ -z "${GH_TOKEN_CODE_REPOS_RW:-}" ] || [ -z "${GH_TOKEN_CODE_REPOS_RO:-}" ]; then
+    exec "$real" "$@"
+fi
+
+# 対象リポジトリを引数から拾う。--repo VALUE / -R VALUE / --repo=VALUE の 3 形。
+repo=""
+prev=""
+for arg in "$@"; do
+    case "$prev" in
+        --repo|-R) repo=$arg; break ;;
+    esac
+    case "$arg" in
+        --repo=*) repo=${arg#--repo=}; break ;;
+    esac
+    prev=$arg
+done
+
+# 引数に無ければ、いまいるリポジトリの origin を見る。
+if [ -z "$repo" ]; then
+    repo=$(git remote get-url origin 2>/dev/null || true)
+fi
+
+# owner/name に揃える。SSH と HTTPS のどちらの形でも来る。
+repo=$(printf '%s' "$repo" | sed -e 's|^git@github\.com:||' \
+    -e 's|^https://github\.com/||' -e 's|^ssh://git@github\.com/||' -e 's|\.git$||')
+
+# 書き込み可能リストに載っていれば RW。載っていなければ RO。
+# 対象が分からないときも RO に倒す（既定を安全側にする）。
+#
+# 一覧は作成時に kit が書き込み用 PAT のスコープから作る。無いのに 2 本立てが
+# 設定されているのは、作成時の取得に失敗したまま使っている状態。全部が読み取り
+# 専用になり、書き込みは 403 か 404 で落ちる。原因が分かるように言っておく。
+list=/home/agent/.config/ios-dev-sandbox/writable-repos
+if [ ! -f "$list" ]; then
+    echo "warning: 書き込み可能なリポジトリの一覧がありません（${list}）。" >&2
+    echo "         ios-dev-sandbox apply で作り直してください。" >&2
+fi
+
+token=$GH_TOKEN_CODE_REPOS_RO
+if [ -n "$repo" ] && [ -f "$list" ]; then
+    while IFS= read -r writable; do
+        if [ "$writable" = "$repo" ]; then
+            token=$GH_TOKEN_CODE_REPOS_RW
+            break
+        fi
+    done < "$list"
+fi
+
+GH_TOKEN=$token
+export GH_TOKEN
+exec "$real" "$@"

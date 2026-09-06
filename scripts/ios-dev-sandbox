@@ -1,0 +1,89 @@
+#!/bin/bash
+set -euo pipefail
+
+# ~/.local/bin からの symlink で呼ばれるので、実体まで辿ってから lib/ を探す。
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  link="$(readlink "$SELF")"
+  case "$link" in
+    /*) SELF="$link" ;;
+    *)  SELF="$(dirname "$SELF")/$link" ;;
+  esac
+done
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+ROOT="$(dirname "$SELF_DIR")"
+
+# 中身は lib/ にドメインごとに分けてある。読み込み順は env.sh だけ意味を持つ
+# （他のファイルが使う定数を置くため）。
+LIB="$SELF_DIR/lib"
+. "$LIB/env.sh"      # パス・定数・agent の判定
+. "$LIB/project.sh"  # 作業ディレクトリから置き場を特定する
+. "$LIB/config.sh"   # share/ と local/ の設定を読む
+. "$LIB/sbxenv.sh"   # sbx への宣言を組む
+. "$LIB/bridge.sh"   # host-bridge と Xcode を起こす
+. "$LIB/sandbox.sh"  # サンドボックスを作る・入る・作り直す
+. "$LIB/login.sh"    # トークンの登録
+. "$LIB/status.sh"   # 状態を出す
+
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+case "${1:-}" in
+  init)           cmd_init ;;
+  login)          cmd_login ;;
+  github-login)   cmd_github_login ;;
+  copilot-login)  cmd_copilot_login ;;
+  litellm-login)  cmd_litellm_login ;;
+  status)         cmd_status ;;
+  apply)          shift; cmd_apply "$@" ;;
+  restart-bridge) cmd_restart_bridge ;;
+  mcp-auth)       shift; cmd_mcp_auth "$@" ;;
+  mcp-token)      shift; cmd_mcp_token "$@" ;;
+  artifacts-path) cmd_artifacts_path ;;
+  tools)          shift; cmd_tools "$@" ;;
+  help|--help|-h)
+    cat <<'EOS'
+使い方: ios-dev-sandbox [コマンド]
+
+コマンド:
+  (なし)         カレントディレクトリの iOS プロジェクトをサンドボックスで開く
+                 追加の引数は sbx run へ渡る（例: -d で接続せずに作成）
+  init           このプロジェクトの置き場を確保し、local/gateway.json の雛形を作る
+  login          Claude の認証。1 回だけ、全サンドボックスで共有
+  github-login   GitHub の PAT を登録。1 回だけ、全サンドボックスで共有
+  litellm-login  社内 LiteLLM の API キーを登録（ゲートウェイ経由で使う人だけ）
+  copilot-login  Copilot 用の fine-grained PAT を登録（copilot を使う人だけ）
+  status         解決されたパス・レイヤー・ブリッジの状態を表示
+  apply          サンドボックスを作り直して kit・設定の変更を反映する
+                 会話履歴はホストに残るが自動では再開しない
+                 （claude なら /resume か claude --continue、codex なら codex resume）
+  restart-bridge allowlist・host-mcp.json の変更を反映する
+  mcp-auth       auth: oauth の MCP サーバーをブラウザで認可する
+  mcp-token      auth: token の MCP サーバーに発行済みトークンを登録する
+  artifacts-path このプロジェクトの成果物置き場を表示する（ホスト側の絶対パス）
+  tools [名前]   MCP サーバーごとのツール制限を見る（名前を付ければ許可ツールを列挙）
+
+設定は clone の中（マウントされるワークスペースには入らない）。
+share/ と kits/ は git 管理でチーム全員に配られ、local/ は gitignore でこのマシンだけ:
+  share/host-cli.json                           チーム標準の CLI allowlist
+  kits/network-policy/spec.yaml                 チーム標準の外向き許可
+  local/host-cli.json                           マシン固有のパス差し替え / 追加 CLI
+  local/read-only-dirs.txt                      追加で読ませるディレクトリ（全プロジェクト共通）
+
+MCP サーバーの追加は share/host-mcp.json（チーム、PR）か local/host-mcp.json に書く。
+実際に使われているパスは ios-dev-sandbox status に出る（環境変数で差し替えた場合も）。
+
+環境変数:
+  IOS_DEV_SANDBOX_DEVELOPER_DIR   mcpbridge を特定の Xcode に固定（既定: xcode-select に追従）
+  IOS_DEV_SANDBOX_BRIDGE          host-bridge のパス
+  IOS_DEV_SANDBOX_CONFIG          ユーザー設定ディレクトリ（既定: ~/.config/ios-dev-sandbox）
+  IOS_DEV_SANDBOX_SHARE           チーム標準の host-cli.json の置き場
+  IOS_DEV_SANDBOX_KITS            kit のディレクトリ（チェックアウトでは <repo>/kits）
+  IOS_DEV_SANDBOX_ETC             マシン固有の設定の置き場（既定: <clone>/local）
+  IOS_DEV_SANDBOX_SECRETS         トークンの置き場（既定: ~/.config/ios-dev-sandbox/secrets）
+  IOS_DEV_SANDBOX_LOG             ブリッジのログ出力先
+  IOS_DEV_SANDBOX_EXTRA_KITS      追加で当てる kit（コロン区切り、レビュー外）
+EOS
+    ;;
+  -*|"")          cmd_run "$@" ;;
+  *)              die "不明なコマンド: $1（一覧は ios-dev-sandbox help）" ;;
+esac

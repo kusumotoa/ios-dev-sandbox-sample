@@ -1,0 +1,74 @@
+#!/bin/bash
+# 署名の中継が「git のコミットとタグだけを署名する」境界を守っているかを見る。
+# 実際に gpg を呼ぶ手前まで（鍵が無いマシンでも走る）。
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HOST_SIGN="$ROOT/scripts/ios-dev-sandbox-gpg-sign"
+CONTAINER_CLI="$ROOT/kits/host-cli/files/home/.local/bin/host-cli"
+FIXTURES="$(mktemp -d)"
+trap 'rm -rf "$FIXTURES"' EXIT
+
+fails=0
+check() {
+  local label="$1" got="$2" want="$3"
+  if [ "$got" = "$want" ]; then
+    printf '  ok   %-40s %s\n' "$label" "$got"
+  else
+    printf '  FAIL %-40s got %-14s want %s\n' "$label" "$got" "$want" >&2
+    fails=$((fails + 1))
+  fi
+}
+
+# 鍵の設定はホストの ~/.gitconfig から読む。実機の設定でテストの結果が変わらないよう
+# HOME ごと差し替える。
+export HOME="$FIXTURES/home"
+mkdir -p "$HOME"
+
+echo "ホスト側 ios-dev-sandbox-gpg-sign"
+
+# 鍵が無ければ何もしない。ここで通してしまうと gpg の既定鍵で署名しかねない。
+printf '' | "$HOST_SIGN" sign >/dev/null 2>&1
+check "signingkey 未設定なら署名しない" "$?" "2"
+
+git config --global user.signingkey DUMMYKEY
+
+# subcommand は sign と keyid だけ。git が検証で渡す --verify もここで落ちる
+# （allowlist の allowedSubcommands でも弾かれるが、単体でも断る）。
+"$HOST_SIGN" --verify >/dev/null 2>&1
+check "--verify は受け付けない"         "$?" "2"
+"$HOST_SIGN" >/dev/null 2>&1
+check "subcommand 無しは usage"         "$?" "2"
+
+check "keyid はホストの鍵を返す"        "$("$HOST_SIGN" keyid 2>/dev/null)" "DUMMYKEY"
+
+# 任意のバイト列を署名させない。コミットは "tree "、注釈付きタグは "object " で始まる。
+printf 'これは git オブジェクトではない' | "$HOST_SIGN" sign >/dev/null 2>&1
+check "git オブジェクト以外は署名しない" "$?" "3"
+
+# ssh 署名のホストへ中継すると、鍵の種類が食い違ったまま署名しようとする。
+git config --global gpg.format ssh
+printf 'tree 0\n' | "$HOST_SIGN" sign >/dev/null 2>&1
+check "gpg.format が openpgp 以外なら断る" "$?" "2"
+git config --global --unset gpg.format
+
+echo
+echo "コンテナ側 host-cli（git-gpg-sign として呼ばれたとき）"
+
+# git は検証時に gpg.program を --verify 付きで呼ぶ。署名対象はホストから見えない
+# 一時ファイルのパスなので中継しようがない。断ることを確かめる。
+ln -sf "$CONTAINER_CLI" "$FIXTURES/git-gpg-sign"
+out=$("$FIXTURES/git-gpg-sign" --keyid-format=long --status-fd=1 --verify /tmp/x - 2>&1)
+check "--verify は断る"                 "$?" "1"
+case "$out" in
+  *"verification is not"*) check "断る理由を出す" "yes" "yes" ;;
+  *)                       check "断る理由を出す" "$out" "verification is not を含む" ;;
+esac
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "gpg-sign: all checks passed"
+else
+  echo "gpg-sign: $fails 件失敗" >&2
+fi
+exit "$fails"

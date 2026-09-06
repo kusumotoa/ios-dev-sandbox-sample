@@ -1,0 +1,49 @@
+#!/bin/sh
+# チーム標準の settings・ステータスライン・プラグインを ~/.claude へ配る。
+# claude がメインなら claude-config kit が、MCP として使うなら mcp-agents kit が
+# claude を入れた直後に呼ぶ。
+set -e
+
+dest=/home/agent/.claude
+mkdir -p "$dest"
+
+team_statusline="${IOS_DEV_SANDBOX_TEAM_STATUSLINE:-}"
+if [ -n "$team_statusline" ] && [ -f "$team_statusline" ]; then
+    ln -sfn "$team_statusline" "$dest/statusline.sh"
+fi
+
+team_settings="${IOS_DEV_SANDBOX_TEAM_SETTINGS:-}"
+if [ -n "$team_settings" ] && [ -f "$team_settings" ]; then
+    python3 /home/agent/.local/lib/claude-config.py merge-settings \
+        "$team_settings" "$dest/settings.json"
+fi
+
+chown -R agent:agent "$dest" 2>/dev/null || true
+
+list="${IOS_DEV_SANDBOX_TEAM_PLUGINS:-}"
+[ -n "$list" ] && [ -f "$list" ] || exit 0
+
+# kit の install は PATH が限られる。command -v だけだと見失って黙って成功する。
+claude=$(command -v claude 2>/dev/null || echo /home/agent/.local/bin/claude)
+# claude がまだ入っていない状況（メインが codex で、MCP の claude を入れる前など）
+# では何もしない。呼ぶ側が入れ終えてから呼ぶ。
+[ -x "$claude" ] || exit 0
+
+# 先に全部読む。while read の中で claude を呼ぶと残りを stdin から食われる。
+names=$(sed 's/#.*//' "$list" | tr -d '\r' | grep -v '^[[:space:]]*$' || true)
+[ -n "$names" ] || exit 0
+
+# 公式 marketplace は対話起動の初回にしか自動登録されない。非対話では明示が要る。
+su agent -c "'$claude' plugin marketplace add anthropics/claude-plugins-official" \
+    </dev/null >/dev/null 2>&1 || true
+
+for name in $names; do
+    # パイプの終了コードは末尾（sed）のものになる。POSIX sh に pipefail は
+    # 無いので、install の結果を挟まずに見る。
+    if out=$(su agent -c "'$claude' plugin install '$name'" </dev/null 2>&1); then
+        :
+    else
+        printf '%s\n' "$out" | sed "s/^/[claude-config] /" >&2
+        echo "[claude-config] warning: $name を入れられませんでした" >&2
+    fi
+done

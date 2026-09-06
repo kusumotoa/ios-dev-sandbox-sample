@@ -1,0 +1,103 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: mcp-agents
+displayName: 別のエージェントを MCP として使う
+description: |
+  share/mcp-agents.txt と local/mcp-agents.txt に書いたエージェントを同じコンテナに入れ、
+  作業中のエージェントから MCP として呼べるようにする。別モデルのセカンドオピニオンに使う。
+
+  自分自身は入れない。ホストでは動かさない（隔離の外で任意のコードが書かれるため）。
+permissions:
+  network:
+    allow:
+      # claude の公式インストーラとリリース。
+      - claude.ai
+      - downloads.claude.ai
+      # codex を pnpm で取る。プリセット任せにせず、使う kit が宣言する。
+      - registry.npmjs.org
+setup:
+  install:
+    - command: |
+        set -e
+        list="${IOS_DEV_SANDBOX_MCP_AGENTS:-}"
+        [ -n "$list" ] || exit 0
+        self="${IOS_DEV_SANDBOX_AGENT:-claude}"
+        home="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.claude}"
+        case "$self" in
+          claude) target=/home/agent/.claude.json ;;
+          codex)  target=/home/agent/.codex/config.toml; mkdir -p /home/agent/.codex ;;
+          copilot) target="$home/mcp-config.json"; mkdir -p "$home" ;;
+          *) exit 0 ;;
+        esac
+
+        # 公開直後の乗っ取られた版を掴まない。codex は pnpm の minimumReleaseAge、
+        # claude は公式インストーラの stable チャンネル（約 1 週間遅れ）。
+        install_codex() {
+            command -v codex >/dev/null 2>&1 && return 0
+            # npm は min-release-age 非対応なので pnpm を使う。
+            PNPM=/usr/local/share/npm-global/bin/pnpm
+            [ -x "$PNPM" ] || npm install -g pnpm >/dev/null 2>&1
+            [ -x "$PNPM" ] || return 1
+            PNPM_HOME=/usr/local/share/npm-global "$PNPM" add -g @openai/codex \
+                --config.minimumReleaseAge=10080 >/dev/null 2>&1
+        }
+        # 書かないと codex は api.openai.com を向く（メインが codex のときは litellm kit）。
+        configure_codex_gateway() {
+            [ "${IOS_DEV_SANDBOX_LITELLM:-}" = "1" ] || return 0
+            [ -n "${IOS_DEV_SANDBOX_GATEWAY_HOST:-}" ] || return 0
+            mkdir -p /home/agent/.codex
+            python3 /home/agent/.local/lib/register-mcp.py provider \
+                /home/agent/.codex/config.toml "$IOS_DEV_SANDBOX_GATEWAY_HOST" \
+                "${IOS_DEV_SANDBOX_CODEX_MODEL:-}" || return 0
+            chown -R agent:agent /home/agent/.codex
+            return 0
+        }
+        # メインが codex のとき litellm kit は ~/.codex しか書かないので、ここで書く。
+        # 書かないと推論だけが失敗し、api.anthropic.com へ出られる状態も残る（decisions.md）。
+        # 鍵はダミーでよい。実際の鍵はプロキシが通信に差し込む。
+        configure_claude_gateway() {
+            [ "${IOS_DEV_SANDBOX_LITELLM:-}" = "1" ] || return 0
+            [ -n "${IOS_DEV_SANDBOX_GATEWAY_HOST:-}" ] || return 0
+            mkdir -p /home/agent/.claude
+            python3 -c 'import json, os, sys; p, url, tok = sys.argv[1:4]; cur = json.load(open(p)) if os.path.exists(p) else {}; env = cur.setdefault("env", {}); env["ANTHROPIC_BASE_URL"] = url; env["ANTHROPIC_AUTH_TOKEN"] = tok; json.dump(cur, open(p, "w"), ensure_ascii=False, indent=2)' /home/agent/.claude/settings.json "https://$IOS_DEV_SANDBOX_GATEWAY_HOST" proxy-managed || return 0
+            chown agent:agent /home/agent/.claude/settings.json
+            return 0
+        }
+        install_claude() {
+            command -v claude >/dev/null 2>&1 && return 0
+            # npm は postinstall が要り pnpm で入らないので公式インストーラ。bash 専用。
+            # パイプごと agent に渡す（引用が外れると root で走る）。
+            su agent -s /bin/bash -c \
+                "curl -fsSL https://claude.ai/install.sh | bash -s stable" 2>&1 \
+                | sed 's/^/[mcp-agents] /' || true
+            [ -x /home/agent/.local/bin/claude ]
+        }
+
+        for want in $list; do
+            [ "$want" = "$self" ] && continue
+            case "$want" in
+              codex)
+                install_codex || { echo "[mcp-agents] codex を入れられませんでした" >&2; continue; }
+                configure_codex_gateway
+                set -- codex mcp-server ;;
+              claude)
+                install_claude || { echo "[mcp-agents] claude を入れられませんでした" >&2; continue; }
+                configure_claude_gateway
+                # claude-config kit は claude を入れる前に終わっているので、ここで呼ぶ。
+                sh /home/agent/.local/lib/setup-claude || true
+                set -- /home/agent/.local/bin/claude mcp serve ;;
+              copilot)
+                # copilot に MCP サーバーとして立つモードが無い（--acp は別物）。
+                echo "[mcp-agents] copilot は MCP サーバーになれません" >&2
+                continue ;;
+              *)
+                echo "[mcp-agents] 未対応: $want" >&2
+                continue ;;
+            esac
+            # register-mcp.py は host-mcp kit が配る（常に載る）。
+            python3 /home/agent/.local/lib/register-mcp.py agent "$self" "$target" "$want" "$@"
+        done
+        chown agent:agent "$target" 2>/dev/null || true
+      user: "0"
+      description: 指定されたエージェントを入れて MCP として登録する

@@ -1,0 +1,514 @@
+#!/bin/bash
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FIXTURES="$(mktemp -d)"
+IOS_DEV_SANDBOX_CONFIG="$FIXTURES/config"
+IOS_DEV_SANDBOX_SHARE="$FIXTURES/share"
+IOS_DEV_SANDBOX_KITS="$FIXTURES/kits"
+export IOS_DEV_SANDBOX_CONFIG IOS_DEV_SANDBOX_SHARE IOS_DEV_SANDBOX_KITS
+mkdir -p "$IOS_DEV_SANDBOX_CONFIG" "$IOS_DEV_SANDBOX_SHARE" "$IOS_DEV_SANDBOX_KITS/demo"
+source "$ROOT/scripts/ios-dev-sandbox"
+# local/ 由来のものは実機の設定を読まないよう fixture に向ける。向け忘れると、その
+# マシンの local/ の中身でテストの結果が変わる。
+mkdir -p "$FIXTURES/etc"
+READ_ONLY_DIRS="$FIXTURES/etc/read-only-dirs.txt"
+GATEWAY_LOCAL="$FIXTURES/etc/gateway.json"
+MCP_AGENTS_LOCAL="$FIXTURES/etc/mcp-agents.txt"
+MCP_AGENTS_TEAM="$FIXTURES/share/mcp-agents.txt"
+HOST_CLI_LOCAL="$FIXTURES/etc/host-cli.json"
+HOST_MCP_LOCAL="$FIXTURES/etc/host-mcp.json"
+# local/skills は gitignore されていて clone 直後には無い。実機を見に行くと、
+# 持っている人と持っていない人でマウント数が変わる。
+IOS_DEV_SANDBOX_LOCAL_SKILLS="$FIXTURES/etc/skills"
+export IOS_DEV_SANDBOX_LOCAL_SKILLS
+mkdir -p "$IOS_DEV_SANDBOX_LOCAL_SKILLS"
+
+fails=0
+check() {
+  local label="$1" got="$2" want="$3"
+  if [ "$got" = "$want" ]; then
+    printf '  ok   %-34s %s\n' "$label" "$got"
+  else
+    printf '  FAIL %-34s got %-20s want %s\n' "$label" "$got" "$want"
+    fails=$((fails + 1))
+  fi
+}
+
+echo "path_slug"
+check "MyApp"        "$(path_slug /x/MyApp)"        "myapp"
+check "todo-memo"    "$(path_slug /x/todo-memo)"    "todo-memo"
+check "my.app"       "$(path_slug /x/my.app)"       "my.app"
+check "_private"     "$(path_slug /x/_private)"     "private"
+check "2048"         "$(path_slug /x/2048)"         "2048"
+check "app!!! "      "$(path_slug '/x/app!!!')"     "app"       # 末尾は全て剥がす
+check "'  spaces  '" "$(path_slug '/x/  spaces  ')" "spaces"
+check "メモアプリ"   "$(path_slug /x/メモアプリ)"   ""          # 何も残らない
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP" "$FIXTURES"' EXIT
+
+valid() {
+  case "$1" in
+    [a-z0-9]*[a-z0-9]) case "$1" in *[!a-z0-9.-]*) return 1 ;; esac; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+echo
+echo "sandbox_name / project_dir on real directories"
+names=()
+dirs=()
+for dir in "MyApp" "メモアプリ" "家計簿" "日記" "app!!!" "a"; do
+  mkdir -p "$TMP/$dir"
+  name=$(cd "$TMP/$dir" && sandbox_name 2>/dev/null)
+  proj=$(cd "$TMP/$dir" && project_dir)
+  if valid "$name"; then
+    printf '  ok   %-34s %s\n' "$dir" "$name"
+  else
+    printf '  FAIL %-34s %s is not a usable sandbox name\n' "$dir" "$name"
+    fails=$((fails + 1))
+  fi
+  names+=("$name")
+  dirs+=("$proj")
+done
+
+echo
+echo "distinctness"
+for list_name in names dirs; do
+  eval "list=(\"\${${list_name}[@]}\")"
+  unique=$(printf '%s\n' "${list[@]}" | sort -u | wc -l | tr -d ' ')
+  check "$list_name are all distinct" "$unique" "${#list[@]}"
+done
+
+
+
+real_of() { (cd "$1" && pwd -P); }
+
+NAMES="$FIXTURES/naming"
+mkdir -p "$NAMES/a/MyApp" "$NAMES/b/MyApp"
+A=$(real_of "$NAMES/a/MyApp")
+B=$(real_of "$NAMES/b/MyApp")
+
+echo
+echo "project_dir"
+first=$(cd "$A" && project_dir)
+check "衝突しなければ名前そのまま"       "$(basename "$first")" "myapp"
+
+claim_project_dir "$first" "$A"          # 起動 / init と同じ手順
+second=$(cd "$B" && project_dir)
+check "同名の別プロジェクトは接尾辞付き" "$(basename "$second")" "myapp-$(path_hash "$B")"
+check "先に取った側は動かない"           "$(cd "$A" && project_dir)" "$first"
+
+claim_project_dir "$second" "$B"
+check "後から来た側も動かない"           "$(cd "$B" && project_dir)" "$second"
+
+rm -rf "${PROJECTS_DIR:?}"
+
+echo
+echo "claim が無く宣言だけあるときの解決"
+declared="$PROJECTS_DIR/myapp"
+mkdir -p "$declared/$AGENT"
+yaml_scalar workspace "$A" > "$declared/$AGENT/.sbxenv.yaml"
+first_declared=$(cd "$A" && project_dir)
+second_declared=$(cd "$A" && project_dir)
+check "1 回目は素の名前"                 "$(basename "$first_declared")" "myapp"
+check "2 回目も動かない"                 "$second_declared" "$first_declared"
+check "別プロジェクトは退避する"         "$(basename "$(cd "$B" && project_dir)")" \
+                                         "myapp-$(path_hash "$B")"
+rm -rf "${PROJECTS_DIR:?}"
+
+echo
+echo "claim ファイル"
+owned=$(cd "$A" && project_dir)
+claim_project_dir "$owned" "$A"
+check "新名で書かれる"                   "$([ -f "$owned/.claimed-workspace" ] && echo yes)" "yes"
+
+printf '%s\n%s \n' "$A" "/somewhere/else" > "$owned/.claimed-workspace"
+check "余計な行が混ざっても解決先は動かない" "$(cd "$A" && project_dir)" "$owned"
+
+printf '  %s  \n' "$A" > "$owned/.claimed-workspace"
+check "前後の空白を落として読む"         "$(cd "$A" && project_dir)" "$owned"
+rm -rf "${PROJECTS_DIR:?}"
+
+echo
+echo "agent ごとの置き場"
+# sandbox_name はホストの sbx ls を引く。実機に同名のサンドボックスがあると
+# 接尾辞が付いて落ちるので、無いものとして名前を決めさせる。
+no_sandboxes() { ( sbx() { echo '{"sandboxes":[]}'; }; "$@" ); }
+proj=$(cd "$A" && project_dir)
+check "project_dir は agent に依らない"  "$(cd "$A" && AGENT=codex project_dir)" "$proj"
+check "sandbox_name は agent で分かれる" "$(cd "$A" && AGENT=codex no_sandboxes sandbox_name)" "myapp-codex"
+check "claude は接尾辞なし"              "$(cd "$A" && no_sandboxes sandbox_name)" "myapp"
+check "agent_dir は <proj>/<agent>"      "$(cd "$A" && AGENT=copilot agent_dir)" "$proj/copilot"
+check "agent_dir は proj を受け取れる"   "$(AGENT=codex agent_dir /x/proj)" "/x/proj/codex"
+rm -rf "${PROJECTS_DIR:?}"
+
+
+# 指紋は <proj>/<agent> に置き、workspaces は 1 つ上（プロジェクト共通）を見る。
+PROJ="$FIXTURES/project/$AGENT"
+mkdir -p "$PROJ"
+
+export IOS_DEV_SANDBOX_CLAUDE_TOKEN=oauth-a
+echo "kit v1" > "$IOS_DEV_SANDBOX_KITS/demo/spec.yaml"
+printf '{"servers":{"xcode":{"kind":"xcode"}}}' > "$IOS_DEV_SANDBOX_SHARE/host-mcp.json"
+sandbox_fingerprint "$PROJ" > "$PROJ/$FINGERPRINT_FILE"
+
+stale_now() { local s; s=$(stale_inputs "$PROJ"); echo "${s% }"; }
+
+echo
+echo "stale_inputs"
+check "何も変えていない"                 "$(stale_now)" ""
+
+echo "kit v2" > "$IOS_DEV_SANDBOX_KITS/demo/spec.yaml"
+check "kit の内容が変わった"             "$(stale_now)" "kits"
+echo "kit v1" > "$IOS_DEV_SANDBOX_KITS/demo/spec.yaml"
+
+echo "/x/backend" > "$READ_ONLY_DIRS"
+check "読ませる他リポジトリが増えた"     "$(stale_now)" "read-only-dirs"
+rm -f "$READ_ONLY_DIRS"
+
+printf '#コメントと空行だけ\n\n' > "$READ_ONLY_DIRS"
+check "コメントだけの workspaces は同じ" "$(stale_now)" ""
+rm -f "$READ_ONLY_DIRS"
+
+printf '{"servers":{"xcode":{"kind":"xcode"},"extra":{"url":"http://x/mcp"}}}' > "$IOS_DEV_SANDBOX_SHARE/host-mcp.json"
+check "MCP サーバーが増えた"             "$(stale_now)" "mcp"
+printf '{"servers":{"xcode":{"kind":"xcode","tools":["BuildProject"]}}}' > "$IOS_DEV_SANDBOX_SHARE/host-mcp.json"
+check "tools だけの変更は apply 不要"    "$(stale_now)" ""
+
+IOS_DEV_SANDBOX_CLAUDE_TOKEN=oauth-b
+check "トークンが回った"                 "$(stale_now)" "env"
+IOS_DEV_SANDBOX_CLAUDE_TOKEN=oauth-a
+
+echo "kit v2" > "$IOS_DEV_SANDBOX_KITS/demo/spec.yaml"
+IOS_DEV_SANDBOX_CLAUDE_TOKEN=oauth-b
+check "複数が同時に変わった"             "$(stale_now)" "kits env"
+echo "kit v1" > "$IOS_DEV_SANDBOX_KITS/demo/spec.yaml"
+IOS_DEV_SANDBOX_CLAUDE_TOKEN=oauth-a
+
+check "全て戻せば一致に戻る"             "$(stale_now)" ""
+
+# 指紋の env は宣言のブロックそのものを見る。個別に列挙すると、ここに挙げた
+# ものを変えても「作成時と一致」のままになる。
+printf 'codex\n' > "$MCP_AGENTS_LOCAL"
+check "MCP のエージェントが増えた"       "$(stale_now)" "env"
+rm -f "$MCP_AGENTS_LOCAL"
+
+check "戻せば一致に戻る"                 "$(stale_now)" ""
+
+# 中継コマンドの symlink は作成時に張るので、allowlist の変更も拾う必要がある。
+printf '{"commands":[{"name":"probe","path":"/bin/echo"}]}\n' > "$HOST_CLI_LOCAL"
+check "ホスト CLI が増えた"              "$(stale_now)" "host-cli"
+rm -f "$HOST_CLI_LOCAL"
+
+# __pycache__ は kit を使った人のマシンにだけできる。拾うと同じコミットでも
+# 人によって digest が変わり、誰も触っていないのに警告が出続ける。
+mkdir -p "$IOS_DEV_SANDBOX_KITS/demo/__pycache__"
+echo x > "$IOS_DEV_SANDBOX_KITS/demo/__pycache__/a.cpython-314.pyc"
+check "__pycache__ は digest に入らない" "$(stale_now)" ""
+rm -rf "$IOS_DEV_SANDBOX_KITS/demo/__pycache__"
+
+rm -f "$PROJ/$FINGERPRINT_FILE"
+check "記録が無ければ何も報告しない"     "$(stale_now)" ""
+
+
+echo
+echo "resolve_host_cli（sed の置換文字が壊さないか）"
+RH="$FIXTURES/rh"; mkdir -p "$RH/R&D/scripts" "$RH/share"
+printf '{"commands":[{"name":"probe","path":"@@BIN@@/probe-cmd"}]}\n' > "$RH/share/host-cli.json"
+resolved=$(
+  HOST_CLI_TEAM="$RH/share/host-cli.json" HOST_CLI_RESOLVED="$RH/resolved.json" \
+  LOG_DIR="$RH" SELF_DIR="$RH/R&D/scripts" resolve_host_cli
+)
+check "& を含むパスでも壊れない" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commands"][0]["path"])' "$resolved" 2>/dev/null)" \
+  "$RH/R&D/scripts/probe-cmd"
+
+echo
+echo "cmd_tools"
+# tools を書かないサーバーは全許可。設定を開かずに分かることを保証する。
+printf '{"servers":{"xcode":{"kind":"xcode","tools":["BuildProject","RunAllTests"]},"atlassian":{"url":"https://x/mcp"}}}' \
+  > "$IOS_DEV_SANDBOX_SHARE/host-mcp.json"
+check "一覧に制限の数を出す"     "$(cmd_tools | grep -c 'xcode  *2 個に制限')" "1"
+check "一覧に全許可を出す"       "$(cmd_tools | grep -c 'atlassian  *全ツールを通す')" "1"
+check "名前を渡せば列挙する"     "$(cmd_tools xcode | tr '\n' ' ')" "BuildProject RunAllTests "
+check "全許可なら理由を説明する" "$(cmd_tools atlassian | grep -c '全ツールを通します')" "1"
+rc=0; (cmd_tools nosuch >/dev/null 2>&1) || rc=$?
+check "知らない名前は止める"     "$rc" "1"
+check "status 用の 1 行"         "$(mcp_server_tool_counts | tr '\n' ' ')" "atlassian(全許可) xcode(2) "
+printf '{"servers":{"xcode":{"kind":"xcode"}}}' > "$IOS_DEV_SANDBOX_SHARE/host-mcp.json"
+
+
+echo
+echo "dispatcher"
+run_cli() {
+  env IOS_DEV_SANDBOX_CONFIG="$IOS_DEV_SANDBOX_CONFIG" \
+      IOS_DEV_SANDBOX_SHARE="$IOS_DEV_SANDBOX_SHARE" \
+      IOS_DEV_SANDBOX_KITS="$IOS_DEV_SANDBOX_KITS" \
+      "$ROOT/scripts/ios-dev-sandbox" "$@" >/dev/null 2>&1
+  echo $?
+}
+check "未知のコマンドは拒否する" "$(run_cli typo-command)" "1"
+check "help は通る"              "$(run_cli help)" "0"
+
+
+echo
+echo "mcp_agents"
+PA="$FIXTURES/mcp-agents"; mkdir -p "$PA"
+MCP_AGENTS_TEAM="$PA/team"; MCP_AGENTS_LOCAL="$PA/local"
+
+check "どちらも無ければ空"       "$(mcp_agents)" ""
+
+printf '# MCP として使うエージェント\ncodex\n' > "$MCP_AGENTS_TEAM"
+check "コメントを落とす"         "$(mcp_agents)" "codex"
+
+printf 'claude\n' > "$MCP_AGENTS_LOCAL"
+check "チームと個人の和集合"     "$(mcp_agents)" "codex claude"
+
+printf 'claude\ncodex\n' > "$MCP_AGENTS_LOCAL"
+check "重複は 1 つにする"        "$(mcp_agents)" "codex claude"
+
+# 末尾に改行が無いファイルを cat で繋ぐと最終行と次の先頭行がくっつく。
+printf '# c\ncodex' > "$MCP_AGENTS_TEAM"
+printf 'claude\n' > "$MCP_AGENTS_LOCAL"
+check "改行が無くても繋がない"   "$(mcp_agents)" "codex claude"
+
+printf '  codex  \r\n' > "$MCP_AGENTS_TEAM"; rm -f "$MCP_AGENTS_LOCAL"
+check "空白と CR を落とす"       "$(mcp_agents)" "codex"
+
+printf 'codex, claude\n' > "$MCP_AGENTS_TEAM"
+check "カンマ区切りも読む"       "$(mcp_agents)" "codex claude"
+
+printf '# 何も無い\n' > "$MCP_AGENTS_TEAM"
+check "コメントだけなら空"       "$(mcp_agents)" ""
+
+# 片方しか無いのが既定。裸で呼んでも set -e で落ちないこと。
+rm -f "$MCP_AGENTS_LOCAL"; printf 'codex\n' > "$MCP_AGENTS_TEAM"
+rc=0; mcp_agents >/dev/null || rc=$?
+check "片方だけでも成功で返る"   "$rc" "0"
+rm -f "$MCP_AGENTS_TEAM" "$MCP_AGENTS_LOCAL"
+
+
+echo
+echo "gateway_value"
+GW="$FIXTURES/gw"; mkdir -p "$GW/etc"
+GATEWAY_LOCAL="$GW/etc/gateway.json"
+
+check "設定が無ければ空"           "$(gateway_value host)" ""
+
+printf '{"host":"gw.example.com","codexModel":"m1"}\n' > "$GATEWAY_LOCAL"
+check "書いた値を読む"             "$(gateway_value host)" "gw.example.com"
+check "無い鍵は空"                 "$(gateway_value nosuch)" ""
+
+printf '{"host":""}\n' > "$GATEWAY_LOCAL"
+check "host が空なら無効"          "$(gateway_value host)" ""
+
+printf 'not json\n' > "$GATEWAY_LOCAL"
+check "壊れた JSON でも止まらない" "$(gateway_value host)" ""
+rm -f "$GATEWAY_LOCAL"
+
+rc=0; (init_gateway_local >/dev/null 2>&1) || rc=$?
+check "雛形を作れる"               "$rc" "0"
+check "雛形の host は空"           "$(gateway_value host)" ""
+printf '{"host":"mine.example.com"}\n' > "$GATEWAY_LOCAL"
+init_gateway_local >/dev/null 2>&1
+check "既にある設定を上書きしない" "$(gateway_value host)" "mine.example.com"
+rm -f "$GATEWAY_LOCAL"
+
+
+echo
+echo "write_sbxenv"
+ENVDIR="$FIXTURES/envgen"; mkdir -p "$ENVDIR/proj" "$ENVDIR/ws"
+IOS_DEV_SANDBOX_CLAUDE_TOKEN='tok"with\quotes'
+(cd "$ENVDIR/ws" && write_sbxenv "$ENVDIR/proj/$AGENT" probe-name)
+GEN="$ENVDIR/proj/$AGENT/.sbxenv.yaml"
+
+check "宣言が書かれる"           "$([ -f "$GEN" ] && echo yes)" "yes"
+check "name が入る"              "$(grep -c '^name: probe-name$' "$GEN")" "1"
+check "workspace は cwd"         "$(grep -c "^workspace: \"$(cd "$ENVDIR/ws" && pwd -P)\"$" "$GEN")" "1"
+check "share は読み取り専用"     "$(grep -A 1 "^  - path: \"$SHARE_DIR\"$" "$GEN" | grep -c 'readOnly: true')" "1"
+check "state は書き込み可"       "$(grep -A 1 "$ENVDIR/proj/$AGENT/state" "$GEN" | grep -c 'readOnly')" "0"
+check "state は agent の下"      "$(grep -c "path: \"$ENVDIR/proj/$AGENT/state\"" "$GEN")" "1"
+check "ホストの ~/.claude は無い" "$(grep -c "path: \"$HOME/.claude\"" "$GEN")" "0"
+for key in TEAM_SKILLS TEAM_SETTINGS TEAM_STATUSLINE TEAM_PLUGINS MCP_AGENTS LOCAL_SKILLS; do
+  check "IOS_DEV_SANDBOX_$key を渡す" "$(grep -c "^  IOS_DEV_SANDBOX_$key: " "$GEN")" "1"
+done
+check "kit が全部載る"           "$(sed -n '/^kits:/,/^$/p' "$GEN" | grep -c '^  - ')" \
+                                 "$(ls -d "$IOS_DEV_SANDBOX_KITS"/*/ | wc -l | tr -d ' ')"
+check "秘密は値ではなく参照で書く" "$(grep -cF 'CLAUDE_CODE_OAUTH_TOKEN: "${IOS_DEV_SANDBOX_CLAUDE_TOKEN:-}"' "$GEN")" "1"
+check "秘密の値は宣言に現れない"   "$(grep -cF 'with\quotes' "$GEN")" "0"
+check "宣言は本人しか読めない"   "$(stat -f '%Lp' "$GEN")" "600"
+ART="  - path: \"$ENVDIR/proj/artifacts\""
+check "artifacts をマウントする" "$(grep -cF -- "$ART" "$GEN")" "1"
+check "artifacts は書き込み可"   "$(grep -A 1 -F -- "$ART" "$GEN" | grep -c 'readOnly')" "0"
+check "artifacts のパスを渡す"   "$(grep -cF -- "IOS_DEV_SANDBOX_ARTIFACTS: \"$ENVDIR/proj/artifacts\"" "$GEN")" "1"
+WS=$(sed -n '/^additionalWorkspaces:/,/^$/p' "$GEN")
+check "チーム標準スキルを渡す"   "$(grep -c 'IOS_DEV_SANDBOX_TEAM_SKILLS' "$GEN")" "1"
+check "マウントは 4 つ"           "$(printf '%s\n' "$WS" | grep -c '^  - path: ')" "4"
+check "うち読み取り専用は 2 つ"   "$(printf '%s\n' "$WS" | grep -c '^    readOnly: true$')" "2"
+
+printf '%s\n' "$ENVDIR/ws" > "$READ_ONLY_DIRS"
+(cd "$ENVDIR/ws" && write_sbxenv "$ENVDIR/proj/$AGENT" probe-name)
+check "追加分も読み取り専用"     "$(grep -c 'readOnly: true' "$GEN")" "3"
+rm -f "$READ_ONLY_DIRS"
+
+
+echo
+echo "litellm kit のテンプレート"
+# fixture のパスに litellm を含めない（宣言内の出現回数を数えるため）。
+LT="$FIXTURES/gw"; mkdir -p "$LT/kits/litellm" "$LT/kits/demo" "$LT/log" "$LT/etc" "$LT/ws"
+printf 'permissions:\n  network:\n    allow:\n      - %s\n' "$LITELLM_PLACEHOLDER" > "$LT/kits/litellm/spec.yaml"
+echo 'name: demo' > "$LT/kits/demo/spec.yaml"   # spec.yaml の無い kit dir は sed が失敗して止まる
+# sbx secret ls を stub し、鍵の有無を切り替える。fixture の kits / log / 設定に向ける。
+lt_env() {
+  local secret=$1; shift
+  ( sbx() { echo "$secret"; }
+    IOS_DEV_SANDBOX_KITS="$LT/kits" LITELLM_KIT_TEMPLATE="$LT/kits/litellm" \
+    LITELLM_KIT_RESOLVED="$LT/log/kits/litellm" GATEWAY_LOCAL="$LT/etc/gateway.json" \
+    MCP_AGENTS_KIT="$LT/kits/mcp-agents" "$@" )
+}
+GEN2="$LT/proj/$AGENT/.sbxenv.yaml"
+
+check "設定が無ければ kit を作らない"     "$(lt_env litellm-api-key resolve_litellm_kit)" ""
+(cd "$LT/ws" && lt_env litellm-api-key write_sbxenv "$LT/proj/$AGENT" lt-probe)
+check "設定が無ければ litellm は載らない" "$(sed -n '/^kits:/,/^$/p' "$GEN2" | grep -c '/kits/litellm')" "0"
+check "設定が無ければ OAuth を渡す"       "$(grep -c '^  CLAUDE_CODE_OAUTH_TOKEN: ' "$GEN2")" "1"
+check "設定が無ければ LITELLM は 0"       "$(grep -c '^  IOS_DEV_SANDBOX_LITELLM: "0"' "$GEN2")" "1"
+
+printf '{"host":"gw.example.test"}\n' > "$LT/etc/gateway.json"
+check "鍵が無ければ kit を作らない"       "$(lt_env '' resolve_litellm_kit)" ""
+check "host と鍵が揃えば複製を返す"       "$(lt_env litellm-api-key resolve_litellm_kit)" "$LT/log/kits/litellm"
+check "複製は host で埋まる"              "$(grep -c 'gw.example.test' "$LT/log/kits/litellm/spec.yaml")" "1"
+check "複製にプレースホルダは残らない"    "$(grep -c "$LITELLM_PLACEHOLDER" "$LT/log/kits/litellm/spec.yaml")" "0"
+(cd "$LT/ws" && lt_env litellm-api-key write_sbxenv "$LT/proj/$AGENT" lt-probe)
+check "複製の kit を渡す"                 "$(grep -cF -- "- \"$LT/log/kits/litellm\"" "$GEN2")" "1"
+check "repo の litellm kit は渡さない"    "$(grep -cF -- "- \"$LT/kits/litellm\"" "$GEN2")" "0"
+check "他の kit は変わらず載る"           "$(grep -cF -- "- \"$LT/kits/demo\"" "$GEN2")" "1"
+
+# 相手がいなければ mcp-agents を載せない。載せると install は何もしないのに
+# claude.ai と registry.npmjs.org が開いたままになる。
+mkdir -p "$LT/kits/mcp-agents"; echo 'name: mcp-agents' > "$LT/kits/mcp-agents/spec.yaml"
+MCP_AGENTS_TEAM="$LT/team-agents"; MCP_AGENTS_LOCAL="$LT/local-agents"
+(cd "$LT/ws" && lt_env litellm-api-key write_sbxenv "$LT/proj/$AGENT" lt-probe)
+check "相手がいなければ載せない"         "$(grep -cF -- "- \"$LT/kits/mcp-agents\"" "$GEN2")" "0"
+printf 'codex\n' > "$MCP_AGENTS_LOCAL"
+(cd "$LT/ws" && lt_env litellm-api-key write_sbxenv "$LT/proj/$AGENT" lt-probe)
+check "相手がいれば載せる"               "$(grep -cF -- "- \"$LT/kits/mcp-agents\"" "$GEN2")" "1"
+rm -f "$MCP_AGENTS_LOCAL"
+check "ゲートウェイ経由では OAuth を渡さない" "$(grep -c '^  CLAUDE_CODE_OAUTH_TOKEN: ' "$GEN2")" "0"
+check "LITELLM は 1"                      "$(grep -c '^  IOS_DEV_SANDBOX_LITELLM: "1"' "$GEN2")" "1"
+rm -rf "$LT"
+
+echo
+echo "cmd_artifacts_path"
+AP="$FIXTURES/ap"; mkdir -p "$AP/ap-declared" "$AP/ap-bare" "$AP/ap-other"
+(cd "$AP/ap-declared" && pd=$(project_dir) && claim_project_dir "$pd" "$(pwd -P)" \
+    && write_sbxenv "$pd/$AGENT" ap-declared)
+check "宣言があれば返す"         "$(cd "$AP/ap-declared" && cmd_artifacts_path)" \
+                                 "$PROJECTS_DIR/ap-declared/artifacts"
+rc=0; (cd "$AP/ap-bare" && cmd_artifacts_path >/dev/null 2>&1) || rc=$?
+check "宣言が無ければ止める"     "$rc" "1"
+check "止めたときは作らない"     "$([ -e "$PROJECTS_DIR/ap-bare" ] && echo yes || echo no)" "no"
+mkdir -p "$PROJECTS_DIR/ap-other/$AGENT"
+cp "$PROJECTS_DIR/ap-declared/$AGENT/.sbxenv.yaml" "$PROJECTS_DIR/ap-other/$AGENT/.sbxenv.yaml"
+rc=0; (cd "$AP/ap-other" && cmd_artifacts_path >/dev/null 2>&1) || rc=$?
+check "他プロジェクトの宣言では止める" "$rc" "1"
+rm -rf "${PROJECTS_DIR:?}"
+
+echo
+echo "validate_read_only_dirs"
+VW="$FIXTURES/vw"; mkdir -p "$VW/ok-repo"
+printf '%s\n' "$VW/ok-repo" > "$READ_ONLY_DIRS"
+rc=0; (validate_read_only_dirs >/dev/null 2>&1) || rc=$?
+check "実在する絶対パスは通る" "$rc" "0"
+printf '%s\n' "$VW/missing" > "$READ_ONLY_DIRS"
+rc=0; (validate_read_only_dirs >/dev/null 2>&1) || rc=$?
+check "存在しないパスは止める" "$rc" "1"
+printf '%s\n' "relative/path" > "$READ_ONLY_DIRS"
+rc=0; (validate_read_only_dirs >/dev/null 2>&1) || rc=$?
+check "相対パスは止める" "$rc" "1"
+rm -f "$READ_ONLY_DIRS"
+rc=0; (validate_read_only_dirs >/dev/null 2>&1) || rc=$?
+check "ファイルが無ければ通る" "$rc" "0"
+
+echo
+echo "require_sbx_ls"
+rc=0
+(sbx() { return 1; }; require_sbx_ls >/dev/null 2>&1) || rc=$?
+check "sbx ls が失敗したら止める (exit 1)" "$rc" "1"
+rc=0
+(sbx() { echo '{"sandboxes":[]}'; }; require_sbx_ls >/dev/null 2>&1) || rc=$?
+check "sbx ls が通れば続行 (exit 0)" "$rc" "0"
+
+
+echo
+echo "stale_bridge_pid"
+IOS_DEV_SANDBOX_BRIDGE=/opt/expected/bin/host-bridge
+listening_bridge_pid() { echo 4242; }
+
+ps() { echo "/opt/expected/bin/host-bridge"; }
+check "同じ実行ファイルなら入れ替えない" "$(stale_bridge_pid)" ""
+
+ps() { echo "$IOS_DEV_SANDBOX_KITS"; }   # 実在するパス = 併用中の別バイナリ
+check "別パスでも実体が残っていれば触らない" "$(stale_bridge_pid 2>/dev/null)" ""
+
+ps() { echo ""; }
+check "実行ファイルを取れなければ触らない" "$(stale_bridge_pid)" ""
+
+listening_bridge_pid() { echo ""; }
+check "pid を取れなければ触らない" "$(stale_bridge_pid)" ""
+
+# `( ... ) || rc=$?` はサブシェル内の set -e を抑止する。別プロセスで終了コードを見る。
+unset -f listening_bridge_pid ps
+
+exits_cleanly() {
+  env IOS_DEV_SANDBOX_CONFIG="$IOS_DEV_SANDBOX_CONFIG" \
+      IOS_DEV_SANDBOX_SHARE="$IOS_DEV_SANDBOX_SHARE" \
+      IOS_DEV_SANDBOX_KITS="$IOS_DEV_SANDBOX_KITS" \
+      bash -c "source '$ROOT/scripts/ios-dev-sandbox'; $1; stale_bridge_pid >/dev/null" >/dev/null 2>&1
+  echo $?
+}
+
+check "pid が非ゼロでも止まらない" \
+  "$(exits_cleanly 'listening_bridge_pid() { return 1; }')" "0"
+check "ps が非ゼロでも止まらない" \
+  "$(exits_cleanly 'listening_bridge_pid() { echo 4242; }; ps() { return 1; }')" "0"
+
+# bash 3.2 は "$var（" の全角文字を変数名に食い込ませる。bash -n では検出できない。
+# grep の [^\x00-\x7f] はロケール次第で invalid character range になるので perl を使う。
+# ランチャーだけでなく kit が配るスクリプトも見る。コンテナ内でしか動かないので、
+# 壊れていても手元の bash -n や make test では気づけない。
+bad=$(perl -ne 'print "$ARGV:$.: $_" if /\$[A-Za-z_]\w*[^\x00-\x7f]/' \
+  "$ROOT/scripts/ios-dev-sandbox" \
+  "$ROOT"/scripts/lib/*.sh \
+  "$ROOT/scripts/ios-dev-sandbox-gpg-sign" \
+  $(find "$ROOT/kits" -type f \( -name '*.yaml' -o -path '*/bin/*' -o -path '*/lib/*' \) \
+      ! -name '*.pyc' ! -path '*/__pycache__/*' 2>/dev/null))
+if [ -z "$bad" ]; then
+  echo "  ok   \$var の直後に全角文字が無い"
+else
+  echo "  FAIL \$var の直後に全角文字がある（\${var} と書く）" >&2
+  printf '%s\n' "$bad" | head -3 >&2
+  fails=$((fails + 1))
+fi
+
+
+echo
+echo "status の検査"
+CHECK_FAILURES=0
+check_ok "x" >/dev/null; check_warn "y" >/dev/null
+check "警告だけなら失敗しない"   "$CHECK_FAILURES" "0"
+check_ng "z" >/dev/null
+check "失敗を数える"             "$CHECK_FAILURES" "1"
+check_ng "z2" >/dev/null
+check "複数の失敗を数える"       "$CHECK_FAILURES" "2"
+CHECK_FAILURES=0
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "launcher: all checks passed"
+else
+  echo "launcher: $fails check(s) failed"
+fi
+exit "$fails"

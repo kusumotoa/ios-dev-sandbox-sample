@@ -1,0 +1,117 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: agent-state
+displayName: 会話履歴とプラグインを残す
+description: |
+  サンドボックスを作り直すと消えるものを、ホスト側の <proj>/<agent>/state/ へ bind する。
+  会話履歴は agent ごとに形式が違うので、置き場も agent ごとに分かれている。
+setup:
+  install:
+    - command: |
+        set -e
+        state="${IOS_DEV_SANDBOX_STATE_DIR:-}"
+        [ -n "$state" ] || exit 0
+        home="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.claude}"
+        # state は virtiofs で起動直後は見えないことがある。待って、駄目なら失敗させる。
+        i=0
+        while [ ! -d "$state" ] && [ "$i" -lt 30 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ ! -d "$state" ]; then
+            echo "[agent-state] $state が見えません。会話履歴を引き継げません" >&2
+            exit 1
+        fi
+
+        # copilot は COPILOT_HOME ごと state の中にある。bind する先が無いので作るだけ。
+        if [ "${IOS_DEV_SANDBOX_AGENT:-claude}" = copilot ]; then
+            mkdir -p "$home"
+            chown agent:agent "$home"
+            echo "[agent-state] $home を用意しました"
+            exit 0
+        fi
+
+        bind_into() {
+            src="$state/$1"
+            dst="$home/$2"
+            mkdir -p "$src" "$dst"
+            if [ "$(findmnt -n -o FSTYPE "$dst" 2>/dev/null | tail -1)" != "virtiofs" ]; then
+                mount --bind "$src" "$dst"
+                chown agent:agent "$dst"
+            fi
+        }
+
+        # state は agent ごとなので、履歴の名前は両側で同じ。
+        sessions="${IOS_DEV_SANDBOX_AGENT_SESSIONS:-projects}"
+        bind_into "$sessions" "$sessions"
+        case "${IOS_DEV_SANDBOX_AGENT:-claude}" in
+          claude)
+            # プラグインは claude だけ。codex に対応する仕組みが無い。
+            bind_into plugins plugins ;;
+          codex)
+            # アーカイブしたセッションも残す。
+            bind_into archived archived_sessions
+            # 索引の SQLite はファイル名が版で変わる（thread_history_1 / state_5）。
+            # CODEX_SQLITE_HOME で置き場ごと渡し、名前は codex に任せる。
+            mkdir -p "$state/db"
+            chown agent:agent "$state/db" ;;
+        esac
+        exit 0
+      user: "0"
+      description: 会話履歴とプラグインを state に bind する
+  startup:
+    - command:
+        - sh
+        - -c
+        - |
+          set -e
+          state="${IOS_DEV_SANDBOX_STATE_DIR:-}"
+          [ -n "$state" ] || exit 0
+          home="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.claude}"
+          # state は virtiofs で起動直後は見えないことがある。待って、駄目なら失敗させる。
+          i=0
+          while [ ! -d "$state" ] && [ "$i" -lt 30 ]; do
+              sleep 1
+              i=$((i + 1))
+          done
+          if [ ! -d "$state" ]; then
+              echo "[agent-state] $state が見えません。会話履歴を引き継げません" >&2
+              exit 1
+          fi
+
+          # copilot は COPILOT_HOME ごと state の中にある。bind する先が無いので作るだけ。
+          if [ "${IOS_DEV_SANDBOX_AGENT:-claude}" = copilot ]; then
+              mkdir -p "$home"
+              chown agent:agent "$home"
+              exit 0
+          fi
+
+          bind_into() {
+              src="$state/$1"
+              dst="$home/$2"
+              mkdir -p "$src" "$dst"
+              if [ "$(findmnt -n -o FSTYPE "$dst" 2>/dev/null | tail -1)" != "virtiofs" ]; then
+                  mount --bind "$src" "$dst"
+                  chown agent:agent "$dst"
+                fi
+          }
+
+          # state は agent ごとなので、履歴の名前は両側で同じ。
+          sessions="${IOS_DEV_SANDBOX_AGENT_SESSIONS:-projects}"
+          bind_into "$sessions" "$sessions"
+          case "${IOS_DEV_SANDBOX_AGENT:-claude}" in
+            claude)
+              # プラグインは claude だけ。codex に対応する仕組みが無い。
+              bind_into plugins plugins ;;
+            codex)
+              # アーカイブしたセッションも残す。
+              bind_into archived archived_sessions
+              # 索引の SQLite はファイル名が版で変わる（thread_history_1 / state_5）。
+              # CODEX_SQLITE_HOME で置き場ごと渡し、名前は codex に任せる。
+              mkdir -p "$state/db"
+              chown agent:agent "$state/db" ;;
+          esac
+          exit 0
+      user: "0"
+      description: 会話履歴とプラグインを state に bind する

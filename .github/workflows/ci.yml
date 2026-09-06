@@ -1,0 +1,29 @@
+# mise run test を macOS ランナーで走らせる。sbx はランナーに無いので、
+# scripts/tests/kits の sbx kit validate は自動で skip になる。
+#
+# 当面は手動起動のみ（意図的な無効化）。PR ごとに走らせるときは
+# workflow_dispatch の下に以下を足す:
+#   pull_request:
+#   push:
+#     branches: [main]
+name: CI
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Package.swift が macOS 26 を要求するため、macos-26（Xcode 26 系を同梱）。
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - run: swift --version
+      - run: mise run test

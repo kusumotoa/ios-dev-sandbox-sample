@@ -1,0 +1,95 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: litellm
+displayName: 社内 LiteLLM ゲートウェイ
+description: |
+  エージェントを LiteLLM ゲートウェイ経由で使う人のための許可と鍵の注入。
+  鍵はプロキシが宛先ごとに差し込むので、サンドボックスの中には入らない。
+
+  推論の宛先を変えるのは claude と codex。copilot は対応していない（GitHub の
+  Copilot サービスに繋ぐ前提のツールで、向け先を変えられるか未確認）。
+  Brave Search MCP は 3 つとも登録する。
+
+  このファイルはテンプレート。credentials の inject と permissions.network は宛先を
+  静的に書く必要があり設定から差し替えられないので、ランチャーが
+  litellm-gateway.placeholder.invalid を local/gateway.json の host で埋めた
+  複製を作って渡す。host か鍵が無いマシンではこの kit 自体を載せない。
+credentials:
+  # 同じ鍵を 2 つの宛先ヘッダへ差し込む。推論は Authorization、Brave Search MCP は
+  # X-LiteLLM-Api-Key を見る。service は 1 つにまとめる（重複宣言は composeで弾かれる）。
+  - service: litellm-api-key
+    required: false
+    apiKey:
+      name: LITELLM_API_KEY
+      proxyManaged: true
+      inject:
+        # scheme: bearer だけだと LiteLLM が受け取れる形にならなかった
+        # （実測: 401 "No api key passed in"）。ヘッダと書式を明示する。
+        - domain: litellm-gateway.placeholder.invalid
+          header: Authorization
+          format: "Bearer %s"
+        - domain: litellm-gateway.placeholder.invalid
+          header: X-LiteLLM-Api-Key
+          format: "Bearer %s"
+permissions:
+  network:
+    allow:
+      - litellm-gateway.placeholder.invalid
+setup:
+  install:
+    - command: |
+        set -e
+        # LITELLM_API_KEY の中身は proxy-managed というダミーで、実際の鍵はプロキシが
+        # 宛先ごとに差し込む。鍵の有無はここでは判定できないので、ランチャーが
+        # ホスト側で調べて渡す。宛先も会社ごとに違うので設定から渡る。
+        if [ "${IOS_DEV_SANDBOX_LITELLM:-}" != "1" ] || [ -z "${IOS_DEV_SANDBOX_GATEWAY_HOST:-}" ]; then
+            exit 0
+        fi
+        base="https://$IOS_DEV_SANDBOX_GATEWAY_HOST"
+        key="${LITELLM_API_KEY:-proxy-managed}"
+
+        # メインのエージェントの推論の宛先。MCP として入れる codex は mcp-agents kit が書く。
+        # copilot は対応していないので、下の Brave Search MCP だけが効く。
+        case "${IOS_DEV_SANDBOX_AGENT:-claude}" in
+          claude)
+            mkdir -p /home/agent/.claude
+            python3 -c 'import json, os, sys; p, url, tok = sys.argv[1:4]; cur = json.load(open(p)) if os.path.exists(p) else {}; env = cur.setdefault("env", {}); env["ANTHROPIC_BASE_URL"] = url; env["ANTHROPIC_AUTH_TOKEN"] = tok; json.dump(cur, open(p, "w"), ensure_ascii=False, indent=2)' /home/agent/.claude/settings.json "$base" "$key"
+            chown agent:agent /home/agent/.claude/settings.json
+            echo "[litellm] claude の推論をゲートウェイ経由に設定しました" ;;
+          codex)
+            mkdir -p /home/agent/.codex
+            python3 /home/agent/.local/lib/register-mcp.py provider \
+                /home/agent/.codex/config.toml "$IOS_DEV_SANDBOX_GATEWAY_HOST" \
+                "${IOS_DEV_SANDBOX_CODEX_MODEL:-}" || exit 0
+            chown -R agent:agent /home/agent/.codex
+            echo "[litellm] codex の推論をゲートウェイ経由に設定しました" ;;
+        esac
+
+        # Brave Search MCP（Web 検索）。推論とは別のヘッダを見る。
+        # codex はヘッダの値を直接書けず、環境変数の「名前」を書く（env_http_headers）。
+        [ -n "${IOS_DEV_SANDBOX_GATEWAY_BRAVE_PATH:-}" ] || exit 0
+        brave_url="$base$IOS_DEV_SANDBOX_GATEWAY_BRAVE_PATH"
+        agent="${IOS_DEV_SANDBOX_AGENT:-claude}"
+        case "$agent" in
+          claude|copilot)
+            if [ "$agent" = claude ]; then
+                target=/home/agent/.claude.json
+                [ -f "$target" ] || exit 0
+            else
+                target="${IOS_DEV_SANDBOX_AGENT_HOME:-/home/agent/.copilot}/mcp-config.json"
+            fi
+            python3 /home/agent/.local/lib/register-mcp.py http \
+                "$agent" "$target" brave-search "$brave_url" \
+                X-LiteLLM-Api-Key "Bearer $key" || exit 0
+            chown agent:agent "$target" ;;
+          codex)
+            mkdir -p /home/agent/.codex
+            python3 /home/agent/.local/lib/register-mcp.py gateway \
+                /home/agent/.codex/config.toml brave-search "$brave_url" || exit 0
+            chown agent:agent /home/agent/.codex/config.toml ;;
+          *) exit 0 ;;
+        esac
+        echo "[litellm] brave-search MCP を登録しました"
+      user: "0"
+      description: 鍵があるときだけ宛先をゲートウェイへ向ける

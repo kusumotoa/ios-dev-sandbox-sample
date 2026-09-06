@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "servers": {
+    "xcode": {
+      "kind": "xcode",
+      "tools": [
+        "BuildProject",
+        "GetBuildLog",
+        "RunAllTests",
+        "RunSomeTests",
+        "GetTestList",
+        "RunProject",
+        "StopProject",
+        "GetConsoleOutput",
+        "DeviceInteractionStartSession",
+        "DeviceInteractionStartWorkspaceSession",
+        "DeviceInteractionInstallAndRun",
+        "DeviceInteractionSynthesize",
+        "DeviceInteractionEndSession",
+        "XcodeRead",
+        "XcodeLS",
+        "XcodeGlob",
+        "XcodeGrep",
+        "XcodeOpenWorkspace",
+        "XcodeListWorkspaces",
+        "XcodeListWindows",
+        "XcodeListSchemes",
+        "XcodeListTargets",
+        "XcodeListTestPlans",
+        "XcodeListRunDestinations",
+        "XcodeRefreshCodeIssuesInFile",
+        "GetTargetBuildSettings",
+        "GetFileCompilerFlags",
+        "XcodeSwitchScheme",
+        "XcodeSwitchRunDestination",
+        "XcodeSwitchTestPlan",
+        "GetCrashIssueLogs",
+        "GetTopCrashIssues",
+        "GetFieldPerformanceIssueLogs",
+        "GetTopFieldPerformanceIssues",
+        "StringCatalogRead",
+        "StringCatalogContext",
+        "DocumentationSearch",
+        "RenderPreview"
+      ]
+    },
+    "figma-desktop": {
+      "url": "http://127.0.0.1:3845/mcp"
+    },
+    "atlassian": {
+      "url": "https://mcp.atlassian.com/v1/mcp",
+      "auth": "oauth"
+    }
+  }
+}

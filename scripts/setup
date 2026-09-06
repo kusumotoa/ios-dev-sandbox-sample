@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+BIN_DIR="$HOME/.local/bin"
+SECRETS_DIR="${IOS_DEV_SANDBOX_SECRETS:-${XDG_CONFIG_HOME:-$HOME/.config}/ios-dev-sandbox/secrets}"
+
+echo "==> ビルド"
+swift build -c release --package-path "$ROOT"
+
+# ios-dev-sandbox-gpg-sign は置かない。ブリッジが clone の絶対パスで呼ぶので、
+# PATH に出す必要がない（allowlist の @@BIN@@ がそのパスに解決される）。
+echo "==> コマンドを $BIN_DIR に置く"
+mkdir -p "$BIN_DIR"
+ln -sfn "$ROOT/scripts/ios-dev-sandbox" "$BIN_DIR/ios-dev-sandbox"
+echo "    $BIN_DIR/ios-dev-sandbox"
+
+echo "==> 置き場を作る"
+mkdir -p "$ROOT/local"
+chmod 700 "$SECRETS_DIR" 2>/dev/null || mkdir -p -m 700 "$SECRETS_DIR"
+echo "    設定: $ROOT/local"
+echo "    トークン類: $SECRETS_DIR"
+
+# ネットワークポリシーはマシンに 1 度だけ選ぶもので、選ばないまま最初の
+# サンドボックスを作ると sbx が対話で聞いてくる。ここで済ませておく。
+# 初期化済みなら失敗するだけで、各自が選び直した設定はそのまま。
+echo "==> ネットワークポリシー"
+if ! command -v sbx >/dev/null; then
+    echo "    sbx がまだありません（入れたあとで mise run setup をやり直してください）"
+elif sbx policy init balanced >/dev/null 2>&1; then
+    echo "    balanced で初期化しました（AI サービスやパッケージレジストリが許可された状態）"
+else
+    echo "    初期化済み（sbx policy ls で確認できます）"
+fi
+
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+        # 書き先はシェルによって違う。$SHELL から推測して、外したら一般名で言う。
+        case "${SHELL##*/}" in
+            zsh)  rc="~/.zshrc" ;;
+            bash) rc="~/.bash_profile" ;;
+            fish) rc="~/.config/fish/config.fish" ;;
+            *)    rc="お使いのシェルの設定ファイル" ;;
+        esac
+        echo
+        echo "==> ~/.local/bin が PATH にありません"
+        echo
+        if [ "${SHELL##*/}" = fish ]; then
+            echo "    $rc に次を足してください:"
+            echo "      fish_add_path \$HOME/.local/bin"
+        else
+            echo "    $rc に次を足してください:"
+            echo "      export PATH=\"\$HOME/.local/bin:\$PATH\""
+        fi
+        ;;
+esac

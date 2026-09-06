@@ -1,0 +1,74 @@
+#!/bin/bash
+# host-mcp.json の読み方（チーム標準とマシン固有の重ね方）を固定する。
+# ここが崩れると status の表示とブリッジの実際の顔ぶれが食い違う。
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+READER="$ROOT/scripts/lib/mcp-servers.py"
+FIXTURES="$(mktemp -d)"
+trap 'rm -rf "$FIXTURES"' EXIT
+
+fails=0
+check() {
+  local label="$1" got="$2" want="$3"
+  if [ "$got" = "$want" ]; then
+    printf '  ok   %-38s %s\n' "$label" "$got"
+  else
+    printf '  FAIL %-38s got %-18s want %s\n' "$label" "$got" "$want" >&2
+    fails=$((fails + 1))
+  fi
+}
+
+TEAM="$FIXTURES/host-mcp.json"
+LOCAL="$FIXTURES/local-host-mcp.json"
+read_mcp() { python3 "$READER" "$TEAM" "$LOCAL" "$@"; }
+
+cat > "$TEAM" <<'EOF'
+{
+  "servers": {
+    "xcode":  { "kind": "xcode", "tools": ["A", "B"] },
+    "shared": { "url": "https://team.example.com/mcp", "auth": "oauth" },
+    "open":   { "url": "https://open.example.com/mcp" }
+  }
+}
+EOF
+cat > "$LOCAL" <<'EOF'
+{
+  "servers": {
+    "shared": { "url": "https://local.example.com/mcp", "auth": "token" },
+    "mine":   { "command": ["npx", "x"], "tools": ["C"] }
+  }
+}
+EOF
+
+check "両方のサーバーが出る"        "$(read_mcp names | tr '\n' ' ')" "mine open shared xcode "
+check "tools の数を添える"          "$(read_mcp counts | grep '^xcode')" "xcode(2)"
+check "tools 無しは全許可"          "$(read_mcp counts | grep '^open')"  "open(全許可)"
+
+# ブリッジ側（ProxyConfiguration.merged）は同名の local を無視してチーム標準を採る。
+# ここが食い違うと、status では token 待ちに見えるのに実際は oauth で繋ぎに行く。
+check "同名はチーム標準が勝つ"      "$(read_mcp unauthorized "$FIXTURES/none" "$FIXTURES/none" | grep '^oauth')" \
+                                    "$(printf 'oauth\tshared')"
+check "負けた側の auth は出ない"    "$(read_mcp unauthorized "$FIXTURES/none" "$FIXTURES/none" | grep -c '^token')" "0"
+
+mkdir -p "$FIXTURES/oauth" && : > "$FIXTURES/oauth/shared.json"
+check "認可済みなら出ない"          "$(read_mcp unauthorized "$FIXTURES/oauth" "$FIXTURES/none")" ""
+
+check "許可ツールを列挙する"        "$(read_mcp tools xcode | tr '\n' ' ')" "A B "
+read_mcp tools nosuch >/dev/null 2>&1
+check "知らない名前は失敗する"      "$?" "1"
+
+# 片方が壊れていても、もう片方は読めたままにする。status が丸ごと死ぬのを避ける。
+echo 'not json' > "$LOCAL"
+check "壊れた JSON でも止まらない"  "$(read_mcp names | tr '\n' ' ')" "open shared xcode "
+
+rm -f "$LOCAL"
+check "local が無くても読める"      "$(read_mcp names | tr '\n' ' ')" "open shared xcode "
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "mcp-servers: all checks passed"
+else
+  echo "mcp-servers: $fails 件失敗" >&2
+fi
+exit "$fails"

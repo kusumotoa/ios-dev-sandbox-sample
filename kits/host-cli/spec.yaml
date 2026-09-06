@@ -1,0 +1,30 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: host-cli
+displayName: ホスト CLI のブリッジ
+description: |
+  allowlist に載った macOS 専用の CLI を、サンドボックスから host-bridge へ
+  転送する。それらを呼ぶスキルがサンドボックス内でもそのまま動く。コマンドの
+  一覧はここで固定しない。サンドボックス作成時にブリッジ自身の allowlist から
+  読むので、ホスト側に CLI を足すだけでよい。
+setup:
+  install:
+    - command: |
+        set -e
+        chmod 0755 /home/agent/.local/bin/host-cli
+
+        base="${HOST_BRIDGE_URL:-http://host.docker.internal:19721/exec}"
+        health="${base%/exec}/health"
+        names=$(curl -sf --max-time 10 "$health" \
+                | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("commands", [])))' \
+                || true)
+        if [ -z "$names" ]; then
+            echo "[host-cli] ブリッジに届きません（${health}）。中継コマンドは置きません" >&2
+        fi
+        for name in $names; do
+            ln -sf /home/agent/.local/bin/host-cli /home/agent/.local/bin/"$name"
+        done
+        chown -R agent:agent /home/agent/.local/bin
+      user: "0"
+      description: ホストのブリッジが許可する全コマンドの中継コマンドを置く

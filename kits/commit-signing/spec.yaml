@@ -1,0 +1,49 @@
+schemaVersion: "2"
+kind: mixin
+sourceURL: https://github.com/kusumotoa/ios-dev-sandbox-sample
+name: commit-signing
+displayName: ホストの鍵で署名するコミット
+description: |
+  サンドボックス内のコミットを macOS ホストの GPG 鍵で署名し、GitHub 上で
+  Unverified ではなく Verified にする。PAT は push を認証するだけで署名はせず、
+  鍵をサンドボックスへ複製すればエージェントが持ち出せる鍵になる。そこで鍵は
+  ホストに置いたまま、git の gpg.program をホストへの中継コマンドにして、
+  コミットオブジェクトを host-bridge 越しに送り署名だけを受け取る。ホスト側
+  のラッパーが署名するのは git のコミットとタグだけで、任意のバイト列は扱わない。
+
+  ホストが署名用ラッパーを許可していない場合は何もしない。古いホストに対しても、
+  毎回コミットが失敗するのではなく、署名なしでコミットできる。
+setup:
+  install:
+    - command: |
+        set -e
+        base="${HOST_BRIDGE_URL:-http://host.docker.internal:19721/exec}"
+        health="${base%/exec}/health"
+        allowed=$(curl -sf --max-time 10 "$health" \
+                  | python3 -c 'import json,sys; print("ios-dev-sandbox-gpg-sign" in json.load(sys.stdin).get("commands", []))' \
+                  || true)
+        if [ "$allowed" != "True" ]; then
+            echo "[commit-signing] ホストが ios-dev-sandbox-gpg-sign を許可していません。コミットは未署名のままです" >&2
+            exit 0
+        fi
+
+        mkdir -p /home/agent/.local/bin
+        chmod 0755 /home/agent/.local/bin/host-cli
+        for name in git-gpg-sign ios-dev-sandbox-gpg-sign; do
+            ln -sf /home/agent/.local/bin/host-cli /home/agent/.local/bin/"$name"
+            chown -h agent:agent /home/agent/.local/bin/"$name"
+        done
+      user: "0"
+      description: ホストのブリッジが署名を許可していれば、署名用の中継コマンドを置く
+    - command: |
+        set -e
+        [ -L /home/agent/.local/bin/git-gpg-sign ] || exit 0
+        if ! /home/agent/.local/bin/ios-dev-sandbox-gpg-sign keyid >/dev/null 2>&1; then
+            echo "[commit-signing] ホストに使える署名鍵がありません。コミットは未署名のままです" >&2
+            exit 0
+        fi
+        git config --global gpg.program /home/agent/.local/bin/git-gpg-sign
+        git config --global commit.gpgsign true
+        echo "[commit-signing] コミットはホストの鍵で署名されます"
+      user: agent
+      description: git の gpg.program を中継コマンドに向け、コミット署名を有効にする
