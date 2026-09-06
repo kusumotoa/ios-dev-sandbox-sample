@@ -1,15 +1,9 @@
-# mise run test を macOS ランナーで走らせる。sbx はランナーに無いので、
-# scripts/tests/kits の sbx kit validate は自動で skip になる。
-#
-# 当面は手動起動のみ（意図的な無効化）。PR ごとに走らせるときは
-# workflow_dispatch の下に以下を足す:
-#   pull_request:
-#   push:
-#     branches: [main]
 name: CI
 on:
   workflow_dispatch:
-
+  pull_request:
+  push:
+    branches: [main]
 permissions:
   contents: read
 
