@@ -6,6 +6,8 @@ VM を作るのは [Docker Sandboxes（sbx）](https://www.docker.com/ja-jp/prod
 このリポジトリが足すのは、その中から Xcode と macOS 専用の CLI を使えるようにする橋渡しと、
 チーム標準の設定の配布。
 
+汎用的にしようとした結果、独自スクリプトがなり、おすすめはできません。
+
 ## 前提条件
 
 - Xcode 26.3+
